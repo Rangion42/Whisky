@@ -31,6 +31,45 @@ public class WhiskyWineInstaller {
     /// URL to the installed `wine` `bin` directory
     public static let binFolder: URL = libraryFolder.appending(path: "Wine").appending(path: "bin")
 
+    /// Default Wine version
+    public static let defaultWineVersion = SemanticVersion(7, 7, 0)
+
+    /// Available Wine versions that can be installed
+    public static let availableWineVersions: [SemanticVersion] = [
+        SemanticVersion(7, 7, 0),
+        SemanticVersion(8, 0, 0),
+        SemanticVersion(9, 0, 0),
+        SemanticVersion(10, 0, 0),
+        SemanticVersion(11, 0, 0)
+    ]
+
+    /// Wine versions directory — each version has its own Wine installation
+    public static let wineVersionsDir = libraryFolder.appending(path: "WineVersions")
+
+    /// Get the bin folder for a specific Wine version
+    public static func binFolder(for version: SemanticVersion) -> URL {
+        return wineVersionsDir.appending(path: "Wine-\(version.major).x")
+            .appending(path: "wine-\(version.major).\(version.minor)")
+            .appending(path: "bin")
+    }
+
+    /// Check if a specific Wine version is installed
+    public static func isWineVersionInstalled(_ version: SemanticVersion) -> Bool {
+        let binFolder = binFolder(for: version)
+        let wineBinary = binFolder.appending(path: "wine64")
+        return FileManager.default.fileExists(atPath: wineBinary.path)
+    }
+
+    /// Get the Wine version used by a bottle (or nil if using default)
+    public static func getBottleWineVersion(bottle: Bottle) -> SemanticVersion? {
+        let bottleWineVersion = bottle.settings.wineVersion
+        // If it matches default, bottle uses the default Wine
+        if bottleWineVersion == defaultWineVersion {
+            return nil
+        }
+        return bottleWineVersion
+    }
+
     public static func isWhiskyWineInstalled() -> Bool {
         return whiskyWineVersion() != nil
     }

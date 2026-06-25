@@ -75,4 +75,101 @@ final class BottleVM: ObservableObject, @unchecked Sendable {
         }
         return newBottleDir
     }
+
+    /// Clone an existing bottle with a new name
+    @MainActor
+    func cloneBottle(source: Bottle, cloneName: String) -> URL? {
+        // Generate a unique clone name if not provided
+        let baseName = cloneName.isEmpty ? "\(source.settings.name) (Clone)" : cloneName
+        let existingDirs = bottlesList.paths.map { $0.lastPathComponent }
+        var cloneName = baseName
+        var counter = 1
+        while existingDirs.contains(cloneName) {
+            cloneName = "\(baseName) \(counter)"
+            counter += 1
+        }
+
+        let cloneDir = source.url.deletingLastPathComponent().appending(path: cloneName)
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                try FileManager.default.copyItem(at: source.url, to: cloneDir)
+                let bottle = Bottle(bottleUrl: cloneDir)
+                bottle.settings.name = cloneName
+
+                await MainActor.run {
+                    self.bottles.append(bottle)
+                    self.bottlesList.paths.append(cloneDir)
+                    self.loadBottles()
+                }
+
+                return cloneDir
+            } catch {
+                print("Failed to clone bottle: \(error)")
+                return nil
+            }
+        }
+
+        return nil
+    }
+
+    /// Import a bottle from a .tar or .tar.gz archive
+    @MainActor
+    func importBottle(from archiveURL: URL, destination: URL) -> URL? {
+        Task.detached(priority: .userInitiated) {
+            do {
+                // Extract archive to a temp location first
+                let tempDir = FileManager.default.temporaryDirectory.appending(path: "whisky-import-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                try Tar.untar(tarBall: archiveURL, toURL: tempDir)
+
+                // Find the extracted bottle directory (look for Metadata.plist)
+                let contents = try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+                var bottleDir: URL?
+                for item in contents {
+                    if item.hasDirectoryPath {
+                        let metadataURL = item.appending(path: "Metadata").appendingPathExtension("plist")
+                        if FileManager.default.fileExists(atPath: metadataURL.path) {
+                            bottleDir = item
+                            break
+                        }
+                    }
+                }
+
+                guard let bottleDir = bottleDir else {
+                    print("No valid bottle found in archive")
+                    return nil
+                }
+
+                // Generate a unique import name
+                let baseName = bottleDir.lastPathComponent
+                let existingDirs = self.bottlesList.paths.map { $0.lastPathComponent }
+                var importName = baseName
+                var counter = 1
+                while existingDirs.contains(importName) {
+                    importName = "\(baseName) (Imported) \(counter)"
+                    counter += 1
+                }
+
+                let importDir = destination.appending(path: importName)
+                try FileManager.default.copyItem(at: bottleDir, to: importDir)
+
+                let bottle = Bottle(bottleUrl: importDir)
+                bottle.settings.name = importName
+
+                await MainActor.run {
+                    self.bottles.append(bottle)
+                    self.bottlesList.paths.append(importDir)
+                    self.loadBottles()
+                }
+
+                return importDir
+            } catch {
+                print("Failed to import bottle: \(error)")
+                return nil
+            }
+        }
+
+        return nil
+    }
 }

@@ -24,6 +24,7 @@ struct BottleCreationView: View {
 
     @State private var newBottleName: String = ""
     @State private var newBottleVersion: WinVersion = .win10
+    @State private var newBottleTemplate: BottleTemplate = .blank
     @State private var newBottleURL: URL = UserDefaults.standard.url(forKey: "defaultBottleLocation")
                                            ?? BottleData.defaultBottleDir
     @State private var nameValid: Bool = false
@@ -41,6 +42,17 @@ struct BottleCreationView: View {
                 Picker("create.win", selection: $newBottleVersion) {
                     ForEach(WinVersion.allCases.reversed(), id: \.self) {
                         Text($0.pretty())
+                    }
+                }
+
+                Picker("create.template", selection: $newBottleTemplate) {
+                    ForEach(BottleTemplate.allCases, id: \.self) { template in
+                        VStack(alignment: .leading) {
+                            Text(template.displayName)
+                            Text(template.description)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 
@@ -88,10 +100,47 @@ struct BottleCreationView: View {
     }
 
     func submit() {
-        newlyCreatedBottleURL = BottleVM.shared.createNewBottle(bottleName: newBottleName,
-                                                                winVersion: newBottleVersion,
-                                                                bottleURL: newBottleURL)
+        let newBottleURL = BottleVM.shared.createNewBottle(bottleName: newBottleName,
+                                                            winVersion: newBottleVersion,
+                                                            bottleURL: newBottleURL)
+        // Apply template-specific configuration after bottle is created
+        Task(priority: .userInitiated) {
+            if let bottle = BottleVM.shared.bottles.first(where: { $0.url == newBottleURL }) {
+                applyTemplate(to: bottle, template: newBottleTemplate)
+            }
+        }
         dismiss()
+    }
+
+    private func applyTemplate(to bottle: Bottle, template: BottleTemplate) {
+        // Apply template-specific settings
+        switch template {
+        case .steam:
+            // Steam overlay works better with wined3d, not DXVK
+            bottle.settings.dxvk = false
+            // Steam needs specific locale
+            // Additional Steam-specific env vars would be applied per-program
+        case .epicGames:
+            // Epic Games Store works better with DXVK
+            bottle.settings.dxvk = true
+            bottle.settings.dxvkAsync = true
+        case .gog:
+            // GOG games typically work well with DXVK
+            bottle.settings.dxvk = true
+        case .battleNet:
+            // Battle.net launcher works better without DXVK for the launcher itself
+            bottle.settings.dxvk = false
+            // Some Battle.net games benefit from D3DMetal
+            if #available(macOS 15, *) {
+                bottle.settings.d3dmEnabled = true
+            }
+        case .riotGames:
+            // Riot games often have anti-cheat conflicts with DXVK
+            bottle.settings.dxvk = false
+        case .blank:
+            // No template-specific settings
+            break
+        }
     }
 }
 

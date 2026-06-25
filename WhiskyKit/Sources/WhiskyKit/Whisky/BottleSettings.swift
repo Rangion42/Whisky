@@ -85,6 +85,49 @@ public enum WinVersion: String, CaseIterable, Codable, Sendable {
     }
 }
 
+public enum BottleTemplate: String, CaseIterable, Codable, Sendable {
+    case blank
+    case steam
+    case epicGames
+    case gog
+    case battleNet
+    case riotGames
+
+    public var displayName: String {
+        switch self {
+        case .blank:
+            return String(localized: "template.blank")
+        case .steam:
+            return "Steam"
+        case .epicGames:
+            return "Epic Games"
+        case .gog:
+            return "GOG"
+        case .battleNet:
+            return "Battle.net"
+        case .riotGames:
+            return "Riot Games"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .blank:
+            return String(localized: "template.blank.info")
+        case .steam:
+            return String(localized: "template.steam.info")
+        case .epicGames:
+            return String(localized: "template.epic.info")
+        case .gog:
+            return String(localized: "template.gog.info")
+        case .battleNet:
+            return String(localized: "template.battlenet.info")
+        case .riotGames:
+            return String(localized: "template.riot.info")
+        }
+    }
+}
+
 public enum EnhancedSync: Codable, Equatable {
     case none, esync, msync
 }
@@ -113,6 +156,8 @@ public struct BottleMetalConfig: Codable, Equatable {
     var metalHud: Bool = false
     var metalTrace: Bool = false
     var dxrEnabled: Bool = false
+    var d3dmEnabled: Bool = false
+    var d3dmSupportDxr: Bool = false
 
     public init() {}
 
@@ -121,6 +166,8 @@ public struct BottleMetalConfig: Codable, Equatable {
         self.metalHud = try container.decodeIfPresent(Bool.self, forKey: .metalHud) ?? false
         self.metalTrace = try container.decodeIfPresent(Bool.self, forKey: .metalTrace) ?? false
         self.dxrEnabled = try container.decodeIfPresent(Bool.self, forKey: .dxrEnabled) ?? false
+        self.d3dmEnabled = try container.decodeIfPresent(Bool.self, forKey: .d3dmEnabled) ?? false
+        self.d3dmSupportDxr = try container.decodeIfPresent(Bool.self, forKey: .d3dmSupportDxr) ?? false
     }
 }
 
@@ -225,6 +272,16 @@ public struct BottleSettings: Codable, Equatable {
         set { metalConfig.dxrEnabled = newValue }
     }
 
+    public var d3dmEnabled: Bool {
+        get { return metalConfig.d3dmEnabled }
+        set { metalConfig.d3dmEnabled = newValue }
+    }
+
+    public var d3dmSupportDxr: Bool {
+        get { return metalConfig.d3dmSupportDxr }
+        set { metalConfig.d3dmSupportDxr = newValue }
+    }
+
     public var dxvk: Bool {
         get { return dxvkConfig.dxvk }
         set { dxvkConfig.dxvk = newValue }
@@ -324,6 +381,15 @@ public struct BottleSettings: Codable, Equatable {
 
         if dxrEnabled {
             wineEnv.updateValue("1", forKey: "D3DM_SUPPORT_DXR")
+        }
+
+        if d3dmEnabled {
+            // D3DMetal/GPTK: translates DirectX to Metal natively
+            // When enabled, DXVK should typically be disabled as they conflict
+            wineEnv.updateValue("1", forKey: "D3DMetal")
+            if d3dmSupportDxr {
+                wineEnv.updateValue("1", forKey: "D3DM_SUPPORT_DXR")
+            }
         }
     }
 }

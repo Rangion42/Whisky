@@ -22,10 +22,36 @@ import os.log
 public class Wine {
     /// URL to the installed `DXVK` folder
     private static let dxvkFolder: URL = WhiskyWineInstaller.libraryFolder.appending(path: "DXVK")
-    /// Path to the `wine64` binary
-    public static let wineBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wine64")
-    /// Parth to the `wineserver` binary
-    private static let wineserverBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wineserver")
+
+    /// Get the Wine 64-bit binary path, resolving to the bottle's Wine version if needed
+    public static func wineBinary(for bottle: Bottle? = nil) -> URL {
+        if let bottle = bottle,
+           let bottleVersion = WhiskyWineInstaller.getBottleWineVersion(bottle: bottle),
+           WhiskyWineInstaller.isWineVersionInstalled(bottleVersion) {
+            return WhiskyWineInstaller.binFolder(for: bottleVersion).appending(path: "wine64")
+        }
+        return WhiskyWineInstaller.binFolder.appending(path: "wine64")
+    }
+
+    /// Get the wineserver binary path, resolving to the bottle's Wine version if needed
+    private static func wineserverBinary(for bottle: Bottle? = nil) -> URL {
+        if let bottle = bottle,
+           let bottleVersion = WhiskyWineInstaller.getBottleWineVersion(bottle: bottle),
+           WhiskyWineInstaller.isWineVersionInstalled(bottleVersion) {
+            return WhiskyWineInstaller.binFolder(for: bottleVersion).appending(path: "wineserver")
+        }
+        return WhiskyWineInstaller.binFolder.appending(path: "wineserver")
+    }
+
+    /// Get the Wine bin folder for a bottle, resolving to the bottle's Wine version if needed
+    private static func wineBinFolder(for bottle: Bottle? = nil) -> URL {
+        if let bottle = bottle,
+           let bottleVersion = WhiskyWineInstaller.getBottleWineVersion(bottle: bottle),
+           WhiskyWineInstaller.isWineVersionInstalled(bottleVersion) {
+            return WhiskyWineInstaller.binFolder(for: bottleVersion)
+        }
+        return WhiskyWineInstaller.binFolder
+    }
 
     /// Run a process on a executable file given by the `executableURL`
     private static func runProcess(
@@ -47,10 +73,11 @@ public class Wine {
     /// Run a `wine` process with the given arguments and environment variables returning a stream of output
     private static func runWineProcess(
         name: String? = nil, args: [String], environment: [String: String] = [:],
-        fileHandle: FileHandle?
+        fileHandle: FileHandle?, bottle: Bottle? = nil
     ) throws -> AsyncStream<ProcessOutput> {
         return try runProcess(
-            name: name, args: args, environment: environment, executableURL: wineBinary,
+            name: name, args: args, environment: environment,
+            executableURL: wineBinary(for: bottle),
             fileHandle: fileHandle
         )
     }
@@ -58,10 +85,11 @@ public class Wine {
     /// Run a `wineserver` process with the given arguments and environment variables returning a stream of output
     private static func runWineserverProcess(
         name: String? = nil, args: [String], environment: [String: String] = [:],
-        fileHandle: FileHandle?
+        fileHandle: FileHandle?, bottle: Bottle? = nil
     ) throws -> AsyncStream<ProcessOutput> {
         return try runProcess(
-            name: name, args: args, environment: environment, executableURL: wineserverBinary,
+            name: name, args: args, environment: environment,
+            executableURL: wineserverBinary(for: bottle),
             fileHandle: fileHandle
         )
     }
@@ -77,7 +105,8 @@ public class Wine {
         return try runWineProcess(
             name: name, args: args,
             environment: constructWineEnvironment(for: bottle, environment: environment),
-            fileHandle: fileHandle
+            fileHandle: fileHandle,
+            bottle: bottle
         )
     }
 
@@ -92,7 +121,8 @@ public class Wine {
         return try runWineserverProcess(
             name: name, args: args,
             environment: constructWineServerEnvironment(for: bottle, environment: environment),
-            fileHandle: fileHandle
+            fileHandle: fileHandle,
+            bottle: bottle
         )
     }
 
@@ -111,10 +141,76 @@ public class Wine {
         ) { }
     }
 
+    /// Execute a `wine start /unix {url}` command with per-app DXVK overrides
+    public static func runProgram(
+        at url: URL, args: [String] = [], bottle: Bottle, program: Program, environment: [String: String] = [:]
+    ) async throws {
+        // Resolve per-app DXVK settings
+        let dxvkEnabled: Bool
+        let dxvkAsync: Bool
+        let dxvkHud: DXVKHUD
+
+        if let overrideDxvk = program.settings.dxvkOverride.dxvkOverride {
+            dxvkEnabled = overrideDxvk
+        } else {
+            dxvkEnabled = bottle.settings.dxvk
+        }
+
+        if let overrideAsync = program.settings.dxvkOverride.dxvkAsyncOverride {
+            dxvkAsync = overrideAsync
+        } else {
+            dxvkAsync = bottle.settings.dxvkAsync
+        }
+
+        if let overrideHud = program.settings.dxvkOverride.dxvkHudOverride {
+            dxvkHud = overrideHud
+        } else {
+            dxvkHud = bottle.settings.dxvkHud
+        }
+
+        // Apply per-app DXVK settings
+        if dxvkEnabled {
+            try enableDXVK(bottle: bottle)
+            var finalEnv = environment
+            finalEnv["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11=n,b"
+            switch dxvkHud {
+            case .full:
+                finalEnv["DXVK_HUD"] = "full"
+            case .partial:
+                finalEnv["DXVK_HUD"] = "devinfo,fps,frametimes"
+            case .fps:
+                finalEnv["DXVK_HUD"] = "fps"
+            case .off:
+                break
+            }
+            if dxvkAsync {
+                finalEnv["DXVK_ASYNC"] = "1"
+            }
+            for await _ in try Self.runWineProcess(
+                name: url.lastPathComponent,
+                args: ["start", "/unix", url.path(percentEncoded: false)] + args,
+                bottle: bottle, environment: finalEnv
+            ) { }
+        } else {
+            // DXVK disabled for this program — ensure clean environment
+            var finalEnv = environment
+            // Remove any DXVK-related env vars that might leak from bottle settings
+            finalEnv.removeValue(forKey: "WINEDLLOVERRIDES")
+            finalEnv.removeValue(forKey: "DXVK_HUD")
+            finalEnv.removeValue(forKey: "DXVK_ASYNC")
+            for await _ in try Self.runWineProcess(
+                name: url.lastPathComponent,
+                args: ["start", "/unix", url.path(percentEncoded: false)] + args,
+                bottle: bottle, environment: finalEnv
+            ) { }
+        }
+    }
+
     public static func generateRunCommand(
         at url: URL, bottle: Bottle, args: String, environment: [String: String]
     ) -> String {
-        var wineCmd = "\(wineBinary.esc) start /unix \(url.esc) \(args)"
+        let wineBin = wineBinary(for: bottle)
+        var wineCmd = "\(wineBin.esc) start /unix \(url.esc) \(args)"
         let env = constructWineEnvironment(for: bottle, environment: environment)
         for environment in env {
             wineCmd = "\(environment.key)=\"\(environment.value)\" " + wineCmd
@@ -124,8 +220,9 @@ public class Wine {
     }
 
     public static func generateTerminalEnvironmentCommand(bottle: Bottle) -> String {
+        let binFolder = wineBinFolder(for: bottle)
         var cmd = """
-        export PATH=\"\(WhiskyWineInstaller.binFolder.path):$PATH\"
+        export PATH=\"\(binFolder.path):$PATH\"
         export WINE=\"wine64\"
         alias wine=\"wine64\"
         alias winecfg=\"wine64 winecfg\"

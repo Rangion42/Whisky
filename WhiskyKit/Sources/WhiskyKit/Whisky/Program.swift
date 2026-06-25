@@ -88,6 +88,25 @@ public final class Program: ObservableObject, Equatable, Hashable, Identifiable,
         return environment
     }
 
+    /// Run this program with bottle-aware settings and per-app overrides
+    public func run() {
+        var environment = generateEnvironment()
+
+        // Run the program with the resolved environment, passing self for per-app DXVK overrides
+        Task(priority: .userInitiated) {
+            do {
+                try await Wine.runProgram(at: url, bottle: bottle, program: self, environment: environment)
+                updateStartMenu()
+            } catch {
+                print("Failed to run program: \(error)")
+            }
+        }
+    }
+
+    private func updateStartMenu() {
+        bottle.updateInstalledPrograms()
+    }
+
     /// Save the settings to file
     private func saveSettings() {
         do {

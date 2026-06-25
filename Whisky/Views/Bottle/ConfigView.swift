@@ -43,6 +43,22 @@ struct ConfigView: View {
     var body: some View {
         Form {
             Section("config.title.wine", isExpanded: $wineSectionExpanded) {
+                SettingItemView(title: "config.wineVersion", loadingState: .success) {
+                    Picker("config.wineVersion", selection: $bottle.settings.wineVersion) {
+                        Text("config.wineVersion.default").tag(WhiskyWineInstaller.defaultWineVersion)
+                        Divider()
+                        ForEach(WhiskyWineInstaller.availableWineVersions.filter { $0 > WhiskyWineInstaller.defaultWineVersion }, id: \.self) { version in
+                            HStack {
+                                Text("Wine \(version.major).x (v\(version))")
+                                if !WhiskyWineInstaller.isWineVersionInstalled(version) {
+                                    Image(systemName: "cloud.download")
+                                        .foregroundStyle(.accentColor)
+                                        .help("config.wineVersion.notInstalled")
+                                }
+                            }.tag(version)
+                        }
+                    }
+                }
                 SettingItemView(title: "config.winVersion", loadingState: winVersionLoadingState) {
                     Picker("config.winVersion", selection: $bottle.settings.windowsVersion) {
                         ForEach(WinVersion.allCases.reversed(), id: \.self) {
@@ -148,6 +164,24 @@ struct ConfigView: View {
                             Text("config.dxr")
                             Text("config.dxr.info")
                         }
+                    }
+                }
+                Toggle(isOn: $bottle.settings.d3dmEnabled) {
+                    Text("config.d3dm")
+                    Text("config.d3dm.info")
+                }
+                .onChange(of: bottle.settings.d3dmEnabled) { _, newValue in
+                    if newValue && bottle.settings.dxvk {
+                        bottle.settings.dxvk = false
+                    }
+                }
+                if let device = MTLCreateSystemDefaultDevice() {
+                    if device.supportsFamily(.apple9) {
+                        Toggle(isOn: $bottle.settings.d3dmSupportDxr) {
+                            Text("config.d3dm.dxr")
+                            Text("config.d3dm.dxr.info")
+                        }
+                        .disabled(!bottle.settings.d3dmEnabled)
                     }
                 }
             }

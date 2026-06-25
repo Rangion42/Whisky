@@ -31,6 +31,8 @@ struct BottleView: View {
     @State private var path = NavigationPath()
     @State private var programLoading: Bool = false
     @State private var showWinetricksSheet: Bool = false
+    @State private var showDiagnosticsSheet: Bool = false
+    @State private var diagnosticsResult: Bottle.HealthCheck?
 
     private let gridLayout = [GridItem(.adaptive(minimum: 100, maximum: .infinity))]
 
@@ -71,6 +73,10 @@ struct BottleView: View {
                     }
                     Button("button.winetricks") {
                         showWinetricksSheet.toggle()
+                    }
+                    Button("button.diagnostics") {
+                        diagnosticsResult = bottle.diagnose()
+                        showDiagnosticsSheet.toggle()
                     }
                     Button("button.run") {
                         let panel = NSOpenPanel()
@@ -121,6 +127,49 @@ struct BottleView: View {
             .navigationTitle(bottle.settings.name)
             .sheet(isPresented: $showWinetricksSheet) {
                 WinetricksView(bottle: bottle)
+            }
+            .sheet(isPresented: $showDiagnosticsSheet) {
+                VStack(spacing: 12) {
+                    Text("diagnostics.title")
+                        .fontWeight(.bold)
+                    if let result = diagnosticsResult {
+                        if result.isHealthy {
+                            Label("diagnostics.healthy", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .font(.title2)
+                        } else {
+                            Label("diagnostics.unhealthy", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                                .font(.title2)
+                        }
+                        Divider()
+                        ScrollView {
+                            ForEach(Array(result.issues.enumerated()), id: \.offset) { _, issue in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: issue.severity == .error ? "xmark.circle.fill" : "exclamationmark.triangle.fill")
+                                            .foregroundStyle(issue.severity == .error ? .red : .yellow)
+                                        Text(issue.message)
+                                            .fontWeight(.medium)
+                                    }
+                                    if let suggestion = issue.suggestion {
+                                        Text(suggestion)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                        }
+                    }
+                    Spacer()
+                    Button("button.ok") {
+                        showDiagnosticsSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+                .padding()
+                .frame(width: 400, height: 350)
             }
             .onChange(of: bottle.settings) { oldValue, newValue in
                 guard oldValue != newValue else { return }

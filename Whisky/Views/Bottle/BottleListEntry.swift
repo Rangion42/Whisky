@@ -26,19 +26,60 @@ struct BottleListEntry: View {
     @Binding var refresh: Bool
 
     @State private var showBottleRename: Bool = false
+    @State private var showBottleClone: Bool = false
+    @State private var cloneName: String = ""
     @State private var name: String = ""
+    @State private var healthCheck: Bottle.HealthCheck?
 
     var body: some View {
-        Text(name)
-            .opacity(bottle.isAvailable ? 1.0 : 0.5)
-            .onChange(of: refresh, initial: true) {
-                name = bottle.settings.name
+        HStack(spacing: 4) {
+            // Health indicator dot
+            if bottle.isAvailable, let health = healthCheck {
+                Circle()
+                    .fill(health.isHealthy ? Color.green : (health.warningCount > 0 ? Color.yellow : Color.red))
+                    .frame(width: 8, height: 8)
             }
+
+            Text(name)
+                .opacity(bottle.isAvailable ? 1.0 : 0.5)
+                .onChange(of: refresh, initial: true) {
+                    name = bottle.settings.name
+                    if bottle.isAvailable {
+                        healthCheck = bottle.diagnose()
+                    }
+                }
             .sheet(isPresented: $showBottleRename) {
                 RenameView("rename.bottle.title", name: name) { newName in
                     name = newName
                     bottle.rename(newName: newName)
                 }
+            }
+            .sheet(isPresented: $showBottleClone) {
+                VStack(spacing: 12) {
+                    Text("clone.bottle.title")
+                        .fontWeight(.bold)
+                    TextField("clone.bottle.name", text: $cloneName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 250)
+                    HStack {
+                        Spacer()
+                        Button("create.cancel") {
+                            showBottleClone = false
+                        }
+                        .keyboardShortcut(.cancelAction)
+                        Button("button.clone") {
+                            if let clonedURL = BottleVM.shared.cloneBottle(source: bottle, cloneName: cloneName) {
+                                selected = clonedURL
+                            }
+                            showBottleClone = false
+                            cloneName = ""
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding()
+                .frame(width: 350)
             }
             .contextMenu {
                 Button("button.rename", systemImage: "pencil.line") {
@@ -89,6 +130,31 @@ struct BottleListEntry: View {
                     }
                 }
                 .disabled(!bottle.isAvailable)
+                .labelStyle(.titleAndIcon)
+                Button("button.cloneBottle", systemImage: "square.on.square") {
+                    showBottleClone.toggle()
+                }
+                .disabled(!bottle.isAvailable)
+                .labelStyle(.titleAndIcon)
+                Divider()
+                Button("button.importBottle", systemImage: "square.and.arrow.down") {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = false
+                    panel.allowedContentTypes = [UTType.gzip, UTType(exportedAs: "com.apple.disk-image-archive")]
+                    panel.begin { result in
+                        if result == .OK, let url = panel.urls.first {
+                            Task.detached(priority: .userInitiated) {
+                                let dest = BottleData.defaultBottleDir
+                                if let importedURL = await BottleVM.shared.importBottle(from: url, destination: dest) {
+                                    if let bottle = BottleVM.shared.bottles.first(where: { $0.url == importedURL }) {
+                                        selected = bottle.url
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 .labelStyle(.titleAndIcon)
                 Divider()
                 Button("button.showInFinder", systemImage: "folder") {

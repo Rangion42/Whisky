@@ -26,6 +26,8 @@ struct ProgramView: View {
     @State var cachedIconImage: Image?
     @AppStorage("configSectionExapnded") private var configSectionExpanded: Bool = true
     @AppStorage("envArgsSectionExpanded") private var envArgsSectionExpanded: Bool = true
+    @AppStorage("perAppDxvkExpanded") private var perAppDxvkExpanded: Bool = false
+    @AppStorage("perAppSyncExpanded") private var perAppSyncExpanded: Bool = false
 
     var body: some View {
         Form {
@@ -47,6 +49,69 @@ struct ProgramView: View {
                 }
             }
             EnvironmentArgView(program: program, isExpanded: $envArgsSectionExpanded)
+            Section("program.perApp.dxvk", isExpanded: $perAppDxvkExpanded) {
+                Toggle("program.perApp.dxvk.useDefault", isOn: Binding(
+                    get: { program.settings.dxvkOverride.dxvkOverride == nil },
+                    set: { useDefault in
+                        if useDefault {
+                            var override = program.settings.dxvkOverride
+                            override.dxvkOverride = nil
+                            program.settings.dxvkOverride = override
+                        } else {
+                            var override = program.settings.dxvkOverride
+                            override.dxvkOverride = !bottle.settings.dxvk
+                            program.settings.dxvkOverride = override
+                        }
+                    }
+                ))
+                if program.settings.dxvkOverride.dxvkOverride != nil {
+                    Toggle("program.perApp.dxvk.enable", isOn: Binding(
+                        get: { program.settings.dxvkOverride.dxvkOverride! },
+                        set: { program.settings.dxvkOverride.dxvkOverride = $0 }
+                    ))
+                    Toggle("program.perApp.dxvk.async", isOn: Binding(
+                        get: { program.settings.dxvkOverride.dxvkAsyncOverride ?? bottle.settings.dxvkAsync },
+                        set: { program.settings.dxvkOverride.dxvkAsyncOverride = $0 }
+                    ))
+                    .disabled(!(program.settings.dxvkOverride.dxvkOverride ?? bottle.settings.dxvk))
+                    Picker("program.perApp.dxvk.hud", selection: Binding(
+                        get: { program.settings.dxvkOverride.dxvkHudOverride ?? bottle.settings.dxvkHud },
+                        set: { program.settings.dxvkOverride.dxvkHudOverride = $0 }
+                    )) {
+                        Text("config.dxvkHud.full").tag(DXVKHUD.full)
+                        Text("config.dxvkHud.partial").tag(DXVKHUD.partial)
+                        Text("config.dxvkHud.fps").tag(DXVKHUD.fps)
+                        Text("config.dxvkHud.off").tag(DXVKHUD.off)
+                    }
+                    .disabled(!(program.settings.dxvkOverride.dxvkOverride ?? bottle.settings.dxvk))
+                }
+            }
+            Section("program.perApp.sync", isExpanded: $perAppSyncExpanded) {
+                Toggle("program.perApp.sync.useDefault", isOn: Binding(
+                    get: { program.settings.syncOverride.syncOverride == nil },
+                    set: { useDefault in
+                        if useDefault {
+                            var override = program.settings.syncOverride
+                            override.syncOverride = nil
+                            program.settings.syncOverride = override
+                        } else {
+                            var override = program.settings.syncOverride
+                            override.syncOverride = .none
+                            program.settings.syncOverride = override
+                        }
+                    }
+                ))
+                if program.settings.syncOverride.syncOverride != nil {
+                    Picker("program.perApp.sync.type", selection: Binding(
+                        get: { program.settings.syncOverride.syncOverride ?? bottle.settings.enhancedSync },
+                        set: { program.settings.syncOverride.syncOverride = $0 }
+                    )) {
+                        Text("config.enhancedSync.none").tag(EnhancedSync.none)
+                        Text("config.enhacnedSync.esync").tag(EnhancedSync.esync)
+                        Text("config.enhacnedSync.msync").tag(EnhancedSync.msync)
+                    }
+                }
+            }
         }
         .bottomBar {
             HStack {

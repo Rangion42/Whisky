@@ -66,10 +66,38 @@ public enum Locales: String, Codable, CaseIterable {
     }
 }
 
+public struct ProgramDXVKOverride: Codable, Equatable {
+    var dxvkOverride: Bool?      // nil = use bottle default
+    var dxvkAsyncOverride: Bool?
+    var dxvkHudOverride: DXVKHUD?
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.dxvkOverride = try container.decodeIfPresent(Bool.self, forKey: .dxvkOverride)
+        self.dxvkAsyncOverride = try container.decodeIfPresent(Bool.self, forKey: .dxvkAsyncOverride)
+        self.dxvkHudOverride = try container.decodeIfPresent(DXVKHUD.self, forKey: .dxvkHudOverride)
+    }
+}
+
+public struct ProgramSyncOverride: Codable, Equatable {
+    var syncOverride: EnhancedSync?  // nil = use bottle default
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.syncOverride = try container.decodeIfPresent(EnhancedSync.self, forKey: .syncOverride)
+    }
+}
+
 public struct ProgramSettings: Codable {
     public var locale: Locales = .auto
     public var environment: [String: String] = [:]
     public var arguments: String = ""
+    public var dxvkOverride: ProgramDXVKOverride = ProgramDXVKOverride()
+    public var syncOverride: ProgramSyncOverride = ProgramSyncOverride()
 
     static func decode(from settingsURL: URL) throws -> ProgramSettings {
         guard FileManager.default.fileExists(atPath: settingsURL.path(percentEncoded: false)) else {
