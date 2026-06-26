@@ -22,10 +22,60 @@ import os.log
 public class Wine {
     /// URL to the installed `DXVK` folder
     private static let dxvkFolder: URL = WhiskyWineInstaller.libraryFolder.appending(path: "DXVK")
-    /// Path to the `wine64` binary
+    /// Path to the `wine64` binary (Whisky's bundled Wine)
     public static let wineBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wine64")
-    /// Parth to the `wineserver` binary
+    /// Path to the `wineserver` binary (Whisky's bundled Wine)
     private static let wineserverBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wineserver")
+
+    // MARK: - GPTK Support
+
+    /// Detects the Game Porting Toolkit installation and returns the wine64 binary path
+    public static func gptkWineBinary() -> URL? {
+        // GPTK installs wine64 to /opt/homebrew/bin/wine64 via Homebrew tap
+        let homebrewPath = URL(fileURLWithPath: "/opt/homebrew/bin/wine64")
+        if FileManager.default.fileExists(atPath: homebrewPath.path) {
+            return homebrewPath
+        }
+
+        // Fallback: check if GPTK app is installed (older installations)
+        let gptkAppPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine64/bin/wine64")
+        if FileManager.default.fileExists(atPath: gptkAppPath.path) {
+            return gptkAppPath
+        }
+
+        // Another possible location for GPTK
+        let gptkLibPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/lib/wine/wine64/bin/wine64")
+        if FileManager.default.fileExists(atPath: gptkLibPath.path) {
+            return gptkLibPath
+        }
+
+        return nil
+    }
+
+    /// Returns true if GPTK wine64 binary is detected on the system
+    public static func gptkWineBinaryExists() -> Bool {
+        return Wine.gptkWineBinary() != nil
+    }
+
+    /// Returns the detected GPTK wine64 binary path as a string, or nil
+    public static func gptkWineBinaryPath() -> String? {
+        return Wine.gptkWineBinary()?.path
+    }
+
+    /// Detects the GPTK wineserver binary path
+    private static func gptkWineserverBinary() -> URL? {
+        let homebrewPath = URL(fileURLWithPath: "/opt/homebrew/bin/wineserver")
+        if FileManager.default.fileExists(atPath: homebrewPath.path) {
+            return homebrewPath
+        }
+
+        let gptkLibPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/lib/wine/wine64/bin/wineserver")
+        if FileManager.default.fileExists(atPath: gptkLibPath.path) {
+            return gptkLibPath
+        }
+
+        return nil
+    }
 
     /// Run a process on a executable file given by the `executableURL`
     private static func runProcess(
@@ -55,6 +105,20 @@ public class Wine {
         )
     }
 
+    /// Run a `wine` process with GPTK binaries and the given arguments
+    private static func runGptkProcess(
+        name: String? = nil, args: [String], environment: [String: String] = [:],
+        fileHandle: FileHandle?
+    ) throws -> AsyncStream<ProcessOutput> {
+        guard let gptkWine = Wine.gptkWineBinary() else {
+            throw GPTKError.binaryNotFound
+        }
+        return try runProcess(
+            name: name, args: args, environment: environment, executableURL: gptkWine,
+            fileHandle: fileHandle
+        )
+    }
+
     /// Run a `wineserver` process with the given arguments and environment variables returning a stream of output
     private static func runWineserverProcess(
         name: String? = nil, args: [String], environment: [String: String] = [:],
@@ -66,6 +130,20 @@ public class Wine {
         )
     }
 
+    /// Run a `wineserver` process with GPTK binaries and the given arguments
+    private static func runGptkWineserverProcess(
+        name: String? = nil, args: [String], environment: [String: String] = [:],
+        fileHandle: FileHandle?
+    ) throws -> AsyncStream<ProcessOutput> {
+        guard let gptkWineserver = Wine.gptkWineserverBinary() else {
+            throw GPTKError.binaryNotFound
+        }
+        return try runProcess(
+            name: name, args: args, environment: environment, executableURL: gptkWineserver,
+            fileHandle: fileHandle
+        )
+    }
+
     /// Run a `wine` process with the given arguments and environment variables returning a stream of output
     public static func runWineProcess(
         name: String? = nil, args: [String], bottle: Bottle, environment: [String: String] = [:]
@@ -73,6 +151,14 @@ public class Wine {
         let fileHandle = try makeFileHandle()
         fileHandle.writeApplicaitonInfo()
         fileHandle.writeInfo(for: bottle)
+
+        if bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+            return try runGptkProcess(
+                name: name, args: args,
+                environment: constructWineEnvironment(for: bottle, environment: environment),
+                fileHandle: fileHandle
+            )
+        }
 
         return try runWineProcess(
             name: name, args: args,
@@ -89,6 +175,14 @@ public class Wine {
         fileHandle.writeApplicaitonInfo()
         fileHandle.writeInfo(for: bottle)
 
+        if bottle.settings.gptkEnabled, Wine.gptkWineserverBinary() != nil {
+            return try runGptkWineserverProcess(
+                name: name, args: args,
+                environment: constructWineServerEnvironment(for: bottle, environment: environment),
+                fileHandle: fileHandle
+            )
+        }
+
         return try runWineserverProcess(
             name: name, args: args,
             environment: constructWineServerEnvironment(for: bottle, environment: environment),
@@ -100,7 +194,7 @@ public class Wine {
     public static func runProgram(
         at url: URL, args: [String] = [], bottle: Bottle, environment: [String: String] = [:]
     ) async throws {
-        if bottle.settings.dxvk {
+        if bottle.settings.dxvk && !bottle.settings.gptkEnabled {
             try enableDXVK(bottle: bottle)
         }
 
@@ -108,6 +202,19 @@ public class Wine {
             name: url.lastPathComponent,
             args: ["start", "/unix", url.path(percentEncoded: false)] + args,
             bottle: bottle, environment: environment
+        ) { }
+    }
+
+    /// Execute a `wine start /unix {url}` command via GPTK
+    public static func runProgramGptk(
+        at url: URL, args: [String] = [], bottle: Bottle, environment: [String: String] = [:]
+    ) async throws {
+        // GPTK uses D3DMetal natively — no DXVK needed
+        for await _ in try Self.runGptkProcess(
+            name: url.lastPathComponent,
+            args: ["start", "/unix", url.path(percentEncoded: false)] + args,
+            environment: constructWineEnvironment(for: bottle, environment: environment),
+            fileHandle: try makeFileHandle()
         ) { }
     }
 
@@ -257,6 +364,17 @@ public class Wine {
 
 enum WineInterfaceError: Error {
     case invalidResponce
+}
+
+enum GPTKError: Error, LocalizedError {
+    case binaryNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .binaryNotFound:
+            return String(localized: "gptk.error.binaryNotFound")
+        }
+    }
 }
 
 enum RegistryType: String {

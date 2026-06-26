@@ -134,6 +134,18 @@ struct ConfigView: View {
                 .disabled(!bottle.settings.dxvk)
             }
             Section("config.title.metal", isExpanded: $metalSectionExpanded) {
+                Toggle(isOn: $bottle.settings.gptkEnabled) {
+                    Text("config.gptk")
+                    if !Wine.gptkWineBinaryExists() {
+                        Text("config.gptk.notFound")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("config.gptk.found")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
                 Toggle(isOn: $bottle.settings.metalHud) {
                     Text("config.metalHud")
                 }

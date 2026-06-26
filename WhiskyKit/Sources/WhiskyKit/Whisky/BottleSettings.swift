@@ -124,6 +124,17 @@ public struct BottleMetalConfig: Codable, Equatable {
     }
 }
 
+public struct BottleGptkConfig: Codable, Equatable {
+    var enabled: Bool = false
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+    }
+}
+
 public enum DXVKHUD: Codable, Equatable {
     case full, partial, fps, off
 }
@@ -151,12 +162,14 @@ public struct BottleSettings: Codable, Equatable {
     private var wineConfig: BottleWineConfig
     private var metalConfig: BottleMetalConfig
     private var dxvkConfig: BottleDXVKConfig
+    private var gptkConfig: BottleGptkConfig
 
     public init() {
         self.info = BottleInfo()
         self.wineConfig = BottleWineConfig()
         self.metalConfig = BottleMetalConfig()
         self.dxvkConfig = BottleDXVKConfig()
+        self.gptkConfig = BottleGptkConfig()
     }
 
     // swiftlint:disable line_length
@@ -167,6 +180,7 @@ public struct BottleSettings: Codable, Equatable {
         self.wineConfig = try container.decodeIfPresent(BottleWineConfig.self, forKey: .wineConfig) ?? BottleWineConfig()
         self.metalConfig = try container.decodeIfPresent(BottleMetalConfig.self, forKey: .metalConfig) ?? BottleMetalConfig()
         self.dxvkConfig = try container.decodeIfPresent(BottleDXVKConfig.self, forKey: .dxvkConfig) ?? BottleDXVKConfig()
+        self.gptkConfig = try container.decodeIfPresent(BottleGptkConfig.self, forKey: .gptkConfig) ?? BottleGptkConfig()
     }
     // swiftlint:enable line_length
 
@@ -238,6 +252,11 @@ public struct BottleSettings: Codable, Equatable {
     public var dxvkHud: DXVKHUD {
         get {  return dxvkConfig.dxvkHud }
         set { dxvkConfig.dxvkHud = newValue }
+    }
+
+    public var gptkEnabled: Bool {
+        get { return gptkConfig.enabled }
+        set { gptkConfig.enabled = newValue }
     }
 
     @discardableResult
