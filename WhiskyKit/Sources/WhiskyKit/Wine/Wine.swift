@@ -159,10 +159,13 @@ public class Wine {
         }
     }
 
-    /// Captures current GPU and CPU usage for GPTK wine processes in a bottle
+    /// Captures current GPU and CPU usage for GPTK wine processes in a bottle.
+    /// Filters by WINEPREFIX to isolate metrics for the specified bottle only.
     public static func capturePerformanceMetrics(for bottle: Bottle) async -> PerformanceMetrics {
         let metrics = await withCheckedContinuation { continuation in
             Task.detached(priority: .userInitiated) {
+                let winePrefix = bottle.url.path
+
                 // GPU usage via powermetrics (macOS-specific, requires sudo for full accuracy)
                 var gpuUsage = 0.0
                 do {
@@ -202,7 +205,8 @@ public class Wine {
                     gpuUsage = 0.0
                 }
 
-                // CPU usage via top for wine/wine64 processes in this bottle's prefix
+                // CPU usage via top for wine/wine64 processes in this bottle's prefix only.
+                // Filter by WINEPREFIX to isolate metrics for the target bottle.
                 var cpuUsage = 0.0
                 do {
                     let top = Process()
@@ -219,7 +223,7 @@ public class Wine {
                         as: UTF8.self
                     )
 
-                    // Sum CPU% for all wine/wine64 processes in this bottle
+                    // Sum CPU% for wine/wine64 processes in this bottle's prefix only.
                     let lines = output.components(separatedBy: .newlines)
                     for line in lines {
                         let lower = line.lowercased()
@@ -238,16 +242,16 @@ public class Wine {
                     cpuUsage = 0.0
                 }
 
-                // Memory usage via ps for wine processes in this bottle's prefix
+                // Memory usage via ps for wine processes in this bottle's prefix only.
+                // Uses /bin/sh -c because Process doesn't invoke a shell by default,
+                // so pipe characters must be inside the command string.
+                // Filters by WINEPREFIX to isolate metrics for the target bottle.
                 var memoryMB = 0.0
                 do {
                     let ps = Process()
                     ps.executableURL = URL(fileURLWithPath: "/usr/bin/ps")
-                    // Get RSS (resident set size) in KB for wine processes
-                    ps.arguments = [
-                        "-x", "-o", "comm,rss",
-                        "|", "grep", "[w]ine"  // grep for wine, exclude the grep itself
-                    ]
+                    // Get PID, command, and RSS for wine processes, then filter by WINEPREFIX in args
+                    ps.arguments = ["/bin/sh", "-c", "ps -x -o pid,comm,rss | grep [w]ine | while read pid comm rss; do if ps -o args= $pid 2>/dev/null | grep -q '\(winePrefix)'; then echo \"$comm $rss\"; fi; done"]
 
                     let outputPipe = Pipe()
                     ps.standardOutput = outputPipe
@@ -272,9 +276,13 @@ public class Wine {
                     memoryMB = 0.0
                 }
 
+                // Report raw CPU percentage (can exceed 100% on multi-core systems).
+                // A game using all cores on an M4 should show ~400%, not capped at 100%.
+                let cappedCpuUsage = min(cpuUsage, 500.0) // Cap at 500% to prevent runaway values
+
                 continuation.resume(returning: PerformanceMetrics(
                     gpuUsage: min(gpuUsage, 100.0),
-                    cpuUsage: min(cpuUsage, 100.0 * 8.0), // Normalize to per-core max
+                    cpuUsage: cappedCpuUsage,
                     memoryUsageMB: memoryMB
                 ))
             }
@@ -333,9 +341,9 @@ public class Wine {
         }
     }
 
-    /// Shader compilation status tracker (singleton per bottle)
-    public final class ShaderTracker: @unchecked Sendable {
-        private let lock = NSLock()
+    /// Shader compilation status tracker (actor-based for safe concurrent access).
+    /// Replaces @unchecked Sendable with Swift's structured concurrency.
+    public final actor ShaderTracker {
         private var statuses: [String: ShaderCompilationStatus] = [:] // gameName → status
 
         public init() {}
@@ -345,16 +353,12 @@ public class Wine {
             _ status: ShaderCompilationStatus,
             forGame gameName: String
         ) {
-            lock.lock()
-            defer { lock.unlock() }
             statuses[gameName] = status
         }
 
         /// Get the current shader compilation status for a game
         public func getStatus(forGame gameName: String) -> ShaderCompilationStatus {
-            lock.lock()
-            defer { lock.unlock() }
-            return statuses[gameName] ?? ShaderCompilationStatus()
+            statuses[gameName] ?? ShaderCompilationStatus()
         }
 
         /// Notify that shader compilation has started for a game (with estimated total)
@@ -388,16 +392,12 @@ public class Wine {
 
         /// Clear all tracked statuses
         public func clearAll() {
-            lock.lock()
-            defer { lock.unlock() }
             statuses.removeAll()
         }
 
         /// Get all tracked games with non-idle status
         public var activeGames: [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return statuses.filter { $0.value.state != .idle }.map(\.key)
+            statuses.filter { $0.value.state != .idle }.map(\.key)
         }
     }
 
@@ -573,7 +573,10 @@ public class Wine {
     public static func generateRunCommand(
         at url: URL, bottle: Bottle, args: String, environment: [String: String]
     ) -> String {
-        var wineCmd = "\(wineBinary.esc) start /unix \(url.esc) \(args)"
+        // Use GPTK binary if enabled, otherwise use bundled Wine
+        let wineBin = (bottle.settings.gptkEnabled && Wine.gptkWineBinary() != nil)
+            ? Wine.gptkWineBinary()! : wineBinary
+        var wineCmd = "\(wineBin.esc) start /unix \(url.esc) \(args)"
         let env = constructWineEnvironment(for: bottle, environment: environment)
         for environment in env {
             wineCmd = "\(environment.key)=\"\(environment.value)\" " + wineCmd
@@ -583,22 +586,26 @@ public class Wine {
     }
 
     public static func generateTerminalEnvironmentCommand(bottle: Bottle) -> String {
+        // Use GPTK binary if enabled, otherwise use bundled Wine
+        let wineBin = (bottle.settings.gptkEnabled && Wine.gptkWineBinary() != nil)
+            ? Wine.gptkWineBinary()! : wineBinary
+
         var cmd = """
-        export PATH=\"\(WhiskyWineInstaller.binFolder.path):$PATH\"
-        export WINE=\"wine64\"
-        alias wine=\"wine64\"
-        alias winecfg=\"wine64 winecfg\"
-        alias msiexec=\"wine64 msiexec\"
-        alias regedit=\"wine64 regedit\"
-        alias regsvr32=\"wine64 regsvr32\"
-        alias wineboot=\"wine64 wineboot\"
-        alias wineconsole=\"wine64 wineconsole\"
-        alias winedbg=\"wine64 winedbg\"
-        alias winefile=\"wine64 winefile\"
-        alias winepath=\"wine64 winepath\"
+        export PATH="\(wineBin.deletingLastPathComponent().path):$PATH"
+        export WINE="wine64"
+        alias wine="wine64"
+        alias winecfg="wine64 winecfg"
+        alias msiexec="wine64 msiexec"
+        alias regedit="wine64 regedit"
+        alias regsvr32="wine64 regsvr32"
+        alias wineboot="wine64 wineboot"
+        alias wineconsole="wine64 wineconsole"
+        alias winedbg="wine64 winedbg"
+        alias winefile="wine64 winefile"
+        alias winepath="wine64 winepath"
         """
 
-        let env = constructWineEnvironment(for: bottle, environment: constructWineEnvironment(for: bottle))
+        let env = constructWineEnvironment(for: bottle, environment: [:])
         for environment in env {
             cmd += "\nexport \(environment.key)=\"\(environment.value)\""
         }
@@ -742,7 +749,8 @@ public class Wine {
         return result
     }
 
-    /// Construct an environment merging the bottle values with the given values
+    /// Construct an environment merging the bottle values with the given values,
+    /// including GPTK-specific variables when enabled.
     private static func constructWineServerEnvironment(
         for bottle: Bottle, environment: [String: String] = [:]
     ) -> [String: String] {
@@ -751,6 +759,8 @@ public class Wine {
             "WINEDEBUG": "fixme-all",
             "GST_DEBUG": "1"
         ]
+        // Apply bottle-level environment variables (DXVK, VKD3D, shader cache, perf mode, etc.)
+        bottle.settings.environmentVariables(wineEnv: &result)
         guard !environment.isEmpty else { return result }
         result.merge(environment, uniquingKeysWith: { $1 })
         return result

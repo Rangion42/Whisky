@@ -420,7 +420,14 @@ struct ConfigView: View {
 
             // Load GPTK version and set up periodic metrics if enabled
             if bottle.settings.gptkEnabled {
-                gptkVersion = Wine.gptkVersion()
+                Task(priority: .userInitiated) {
+                    do {
+                        gptkVersion = try await Wine.gptkVersion()
+                    } catch {
+                        print("Failed to load GPTK version: \(error)")
+                        gptkVersion = "unknown"
+                    }
+                }
 
                 // Set up periodic performance metrics refresh (every 2 seconds)
                 metricsTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
@@ -428,13 +435,13 @@ struct ConfigView: View {
                         performanceMetrics = await Wine.capturePerformanceMetrics(for: bottle)
 
                         // Update shader status from tracker
-                        if let activeGame = Wine.shaderTracker.activeGames.first {
-                            shaderStatus = Wine.shaderTracker.getStatus(forGame: activeGame)
+                        if let activeGame = await Wine.shaderTracker.activeGames.first {
+                            shaderStatus = await Wine.shaderTracker.getStatus(forGame: activeGame)
                         } else {
                             // No active games, check if we should reset
                             if shaderStatus.isCompiling {
                                 // Shader compilation may have completed when game exited
-                                shaderStatus = Wine.shaderTracker.getStatus(forGame: "current")
+                                shaderStatus = await Wine.shaderTracker.getStatus(forGame: "current")
                             }
                         }
                     }

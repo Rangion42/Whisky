@@ -58,6 +58,10 @@ extension Program {
         )
     }
 
+    public func generateTerminalEnvironmentCommand() -> String {
+        return Wine.generateTerminalEnvironmentCommand(bottle: bottle)
+    }
+
     public func runInTerminal() {
         let wineCmd = generateTerminalCommand().replacingOccurrences(of: "\\", with: "\\\\")
 
