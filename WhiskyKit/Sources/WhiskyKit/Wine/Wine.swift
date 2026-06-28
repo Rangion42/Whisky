@@ -22,10 +22,402 @@ import os.log
 public class Wine {
     /// URL to the installed `DXVK` folder
     private static let dxvkFolder: URL = WhiskyWineInstaller.libraryFolder.appending(path: "DXVK")
-    /// Path to the `wine64` binary
+    /// Path to the `wine64` binary (Whisky's bundled Wine)
     public static let wineBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wine64")
-    /// Parth to the `wineserver` binary
+    /// Path to the `wineserver` binary (Whisky's bundled Wine)
     private static let wineserverBinary: URL = WhiskyWineInstaller.binFolder.appending(path: "wineserver")
+
+    // MARK: - GPTK Support
+
+    /// Detects the GPTK installation and returns the wine64 binary path
+    public static func gptkWineBinary() -> URL? {
+        // GPTK installs wine64 to /opt/homebrew/bin/wine64 via Homebrew tap
+        let homebrewPath = URL(fileURLWithPath: "/opt/homebrew/bin/wine64")
+        if FileManager.default.fileExists(atPath: homebrewPath.path) {
+            return homebrewPath
+        }
+
+        // Fallback: check if GPTK app is installed (older installations)
+        let gptkAppPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine64/bin/wine64")
+        if FileManager.default.fileExists(atPath: gptkAppPath.path) {
+            return gptkAppPath
+        }
+
+        // Another possible location for GPTK
+        let gptkLibPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/lib/wine/wine64/bin/wine64")
+        if FileManager.default.fileExists(atPath: gptkLibPath.path) {
+            return gptkLibPath
+        }
+
+        return nil
+    }
+
+    /// Returns the detected GPTK wine64 version string, or nil if not available
+    public static func gptkVersion() async throws -> String {
+        guard let binary = Wine.gptkWineBinary() else {
+            throw GPTKError.binaryNotFound
+        }
+
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = ["--version"]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else {
+            return "unknown"
+        }
+
+        // Extract version number (e.g., "wine-9.21" → "9.21")
+        let version = output.replacingOccurrences(of: "^wine-", with: "", options: .regularExpression)
+        return version.isEmpty ? output : version
+    }
+
+    /// Returns the detected GPTK wineserver binary path
+    public static func gptkWineBinaryExists() -> Bool {
+        return Wine.gptkWineBinary() != nil
+    }
+
+    /// Returns the detected GPTK wine64 binary path as a string, or nil
+    public static func gptkWineBinaryPath() -> String? {
+        return Wine.gptkWineBinary()?.path
+    }
+
+    // MARK: - GPTK Update Check (Homebrew)
+
+    /// Checks for available Homebrew updates to the Game Porting Toolkit
+    public static func checkGptkUpdate() async throws -> GPTKUpdateInfo? {
+        let brewPath = "/opt/homebrew/bin/brew"
+        guard FileManager.default.fileExists(atPath: brewPath) else {
+            return nil
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: brewPath)
+        // Use --json=v2 for machine-readable output, limit to gptk formula
+        process.arguments = ["info", "--json=v2", "game-porting-toolkit"]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        try process.run()
+        process.waitUntilExit()
+
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let jsonOutput = String(data: data, encoding: .utf8),
+              let jsonData = jsonOutput.data(using: .utf8) else {
+            return nil
+        }
+
+        // Parse JSON to extract version info
+        if let parsed = try? JSONSerialization.jsonObject(with: jsonData, options: []),
+           let jsonDict = parsed as? [String: Any],
+           let formulas = jsonDict["formulas"] as? [[String: Any]],
+           let formula = formulas.first {
+
+            let installedArray = formula["installed"] as? [[String: Any]]
+            let installedVersion = installedArray?.first?["version"] as? String
+            let latestVersion = formula["latest"] as? String ?? installedVersion
+
+            return GPTKUpdateInfo(
+                installed: installedVersion,
+                latest: latestVersion,
+                needsUpdate: installedVersion != latestVersion && latestVersion != nil
+            )
+        }
+
+        return nil
+    }
+
+    // MARK: - Performance Metrics (GPU/CPU Usage)
+
+    /// Represents GPU and CPU usage metrics for a running GPTK process
+    public struct PerformanceMetrics: Sendable {
+        public let gpuUsage: Double      // 0.0 - 100.0
+        public let cpuUsage: Double      // 0.0 - 100.0
+        public let memoryUsageMB: Double // MB of RAM used by wine process
+        public let frameTimeMs: Double?  // Average frame time in ms (if available)
+        public let timestamp: Date       // When metrics were captured
+
+        public init(
+            gpuUsage: Double,
+            cpuUsage: Double,
+            memoryUsageMB: Double,
+            frameTimeMs: Double? = nil,
+            timestamp: Date = .now
+        ) {
+            self.gpuUsage = gpuUsage
+            self.cpuUsage = cpuUsage
+            self.memoryUsageMB = memoryUsageMB
+            self.frameTimeMs = frameTimeMs
+            self.timestamp = timestamp
+        }
+    }
+
+    /// Captures current GPU and CPU usage for GPTK wine processes in a bottle.
+    /// Filters by WINEPREFIX to isolate metrics for the specified bottle only.
+    public static func capturePerformanceMetrics(for bottle: Bottle) async -> PerformanceMetrics {
+        let metrics = await withCheckedContinuation { continuation in
+            Task.detached(priority: .userInitiated) {
+                let winePrefix = bottle.url.path
+
+                // GPU usage via powermetrics (macOS-specific, requires sudo for full accuracy)
+                var gpuUsage = 0.0
+                do {
+                    let powermetrics = Process()
+                    powermetrics.executableURL = URL(fileURLWithPath: "/usr/bin/powermetrics")
+                    // Sample GPU usage once, output in machine-readable format
+                    powermetrics.arguments = ["-n", "1", "-s", "gpu"]
+
+                    let outputPipe = Pipe()
+                    powermetrics.standardOutput = outputPipe
+                    try powermetrics.run()
+
+                    // Give it a moment to collect data
+                    try await Task.sleep(nanoseconds: 1_000_000) // 1 second
+                    powermetrics.terminate()
+
+                    let output = String(
+                        decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                        as: UTF8.self
+                    )
+
+                    // Parse GPU usage from powermetrics output
+                    if let range = output.range(of: "GPU Activity:") {
+                        let afterRange = output[range.upperBound...]
+                        if let numRange = afterRange.rangeOfCharacter(
+                            from: CharacterSet.decimalDigits,
+                            options: .backwards
+                        ) {
+                            let numStr = String(afterRange[numRange]).trimmingCharacters(
+                                in: CharacterSet.decimalDigits.inverted
+                            )
+                            gpuUsage = Double(numStr) ?? 0.0
+                        }
+                    }
+                } catch {
+                    // powermetrics may fail without sudo; default to 0
+                    gpuUsage = 0.0
+                }
+
+                // CPU usage via top for wine/wine64 processes in this bottle's prefix only.
+                // Filter by WINEPREFIX to isolate metrics for the target bottle.
+                var cpuUsage = 0.0
+                do {
+                    let top = Process()
+                    top.executableURL = URL(fileURLWithPath: "/usr/bin/top")
+                    top.arguments = ["-l", "1", "-o", "CPU"]
+
+                    let outputPipe = Pipe()
+                    top.standardOutput = outputPipe
+                    try top.run()
+                    top.waitUntilExit()
+
+                    let output = String(
+                        decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                        as: UTF8.self
+                    )
+
+                    // Sum CPU% for wine/wine64 processes in this bottle's prefix only.
+                    let lines = output.components(separatedBy: .newlines)
+                    for line in lines {
+                        let lower = line.lowercased()
+                        if (lower.contains("wine64") || lower.contains("wineserver"))
+                            && !lower.contains("top:") {
+                            // Extract CPU percentage (last column on each line)
+                            let parts = line.components(separatedBy: .whitespaces)
+                                .filter { !$0.isEmpty }
+                            if let last = parts.last,
+                               let cpu = Double(last) {
+                                cpuUsage += cpu
+                            }
+                        }
+                    }
+                } catch {
+                    cpuUsage = 0.0
+                }
+
+                // Memory usage via ps for wine processes in this bottle's prefix only.
+                // Uses /bin/sh -c because Process doesn't invoke a shell by default,
+                // so pipe characters must be inside the command string.
+                // Filters by WINEPREFIX to isolate metrics for the target bottle.
+                var memoryMB = 0.0
+                do {
+                    let ps = Process()
+                    ps.executableURL = URL(fileURLWithPath: "/usr/bin/ps")
+                    // Get PID, command, and RSS for wine processes, then filter by WINEPREFIX in args
+                    ps.arguments = ["/bin/sh", "-c", "ps -x -o pid,comm,rss | grep [w]ine | while read pid comm rss; do if ps -o args= $pid 2>/dev/null | grep -q '\(winePrefix)'; then echo \"$comm $rss\"; fi; done"]
+
+                    let outputPipe = Pipe()
+                    ps.standardOutput = outputPipe
+                    try ps.run()
+                    ps.waitUntilExit()
+
+                    let output = String(
+                        decoding: outputPipe.fileHandleForReading.readDataToEndOfFile(),
+                        as: UTF8.self
+                    )
+
+                    let lines = output.components(separatedBy: .newlines)
+                    for line in lines {
+                        let parts = line.components(separatedBy: .whitespaces)
+                            .filter { !$0.isEmpty }
+                        // Format is: comm RSS_KB
+                        if parts.count >= 2, let rssKB = Double(parts[1]) {
+                            memoryMB += rssKB / 1024.0
+                        }
+                    }
+                } catch {
+                    memoryMB = 0.0
+                }
+
+                // Report raw CPU percentage (can exceed 100% on multi-core systems).
+                // A game using all cores on an M4 should show ~400%, not capped at 100%.
+                let cappedCpuUsage = min(cpuUsage, 500.0) // Cap at 500% to prevent runaway values
+
+                continuation.resume(returning: PerformanceMetrics(
+                    gpuUsage: min(gpuUsage, 100.0),
+                    cpuUsage: cappedCpuUsage,
+                    memoryUsageMB: memoryMB
+                ))
+            }
+        }
+
+        return metrics
+    }
+
+    // MARK: - Shader Compilation Tracking
+
+    /// Tracks the status of shader compilation for a GPTK session
+    public struct ShaderCompilationStatus: Sendable {
+        public enum State: String, Sendable {
+            case idle         // No compilation in progress
+            case compiling    // Currently compiling shaders
+            case complete     // All shaders compiled
+            case error        // Compilation failed
+
+            public var description: String {
+                switch self {
+                case .idle: return "shader.status.idle"
+                case .compiling: return "shader.status.compiling"
+                case .complete: return "shader.status.complete"
+                case .error: return "shader.status.error"
+                }
+            }
+        }
+
+        public let state: State
+        public let totalShaders: Int       // Total shaders to compile (if known)
+        public let compiledShaders: Int    // Shaders already compiled
+        public let progressPercent: Double // 0.0 - 100.0
+        public let errorMessage: String?   // Error message if state == .error
+
+        public init(
+            state: State = .idle,
+            totalShaders: Int = 0,
+            compiledShaders: Int = 0,
+            errorMessage: String? = nil
+        ) {
+            self.state = state
+            self.totalShaders = totalShaders
+            self.compiledShaders = compiledShaders
+            self.progressPercent = totalShaders > 0
+                ? Double(compiledShaders) / Double(totalShaders) * 100.0
+                : (state == .complete ? 100.0 : 0.0)
+            self.errorMessage = errorMessage
+        }
+
+        public var isComplete: Bool {
+            return state == .complete || state == .idle && totalShaders == 0
+        }
+
+        public var isCompiling: Bool {
+            return state == .compiling
+        }
+    }
+
+    /// Shader compilation status tracker (actor-based for safe concurrent access).
+    /// Replaces @unchecked Sendable with Swift's structured concurrency.
+    public final actor ShaderTracker {
+        private var statuses: [String: ShaderCompilationStatus] = [:] // gameName → status
+
+        public init() {}
+
+        /// Update the shader compilation status for a specific game
+        public func updateStatus(
+            _ status: ShaderCompilationStatus,
+            forGame gameName: String
+        ) {
+            statuses[gameName] = status
+        }
+
+        /// Get the current shader compilation status for a game
+        public func getStatus(forGame gameName: String) -> ShaderCompilationStatus {
+            statuses[gameName] ?? ShaderCompilationStatus()
+        }
+
+        /// Notify that shader compilation has started for a game (with estimated total)
+        public func startCompilation(forGame gameName: String, estimatedTotal: Int = 0) {
+            updateStatus(
+                ShaderCompilationStatus(state: .compiling, totalShaders: estimatedTotal),
+                forGame: gameName
+            )
+        }
+
+        /// Notify that shader compilation has completed
+        public func completeCompilation(forGame gameName: String, compiledCount: Int = 0) {
+            updateStatus(
+                ShaderCompilationStatus(state: .complete, compiledShaders: compiledCount),
+                forGame: gameName
+            )
+        }
+
+        /// Notify that shader compilation failed with an error
+        public func failCompilation(forGame gameName: String, error: String) {
+            updateStatus(
+                ShaderCompilationStatus(state: .error, errorMessage: error),
+                forGame: gameName
+            )
+        }
+
+        /// Reset status to idle (e.g., when the game exits)
+        public func reset(forGame gameName: String) {
+            updateStatus(ShaderCompilationStatus(), forGame: gameName)
+        }
+
+        /// Clear all tracked statuses
+        public func clearAll() {
+            statuses.removeAll()
+        }
+
+        /// Get all tracked games with non-idle status
+        public var activeGames: [String] {
+            statuses.filter { $0.value.state != .idle }.map(\.key)
+        }
+    }
+
+    /// Global shader tracker instance (one per app lifecycle is fine)
+    public static let shaderTracker = ShaderTracker()
+
+    /// Detects the GPTK wineserver binary path
+    private static func gptkWineserverBinary() -> URL? {
+        let homebrewPath = URL(fileURLWithPath: "/opt/homebrew/bin/wineserver")
+        if FileManager.default.fileExists(atPath: homebrewPath.path) {
+            return homebrewPath
+        }
+
+        let gptkLibPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/lib/wine/wine64/bin/wineserver")
+        if FileManager.default.fileExists(atPath: gptkLibPath.path) {
+            return gptkLibPath
+        }
+
+        return nil
+    }
 
     /// Run a process on a executable file given by the `executableURL`
     private static func runProcess(
@@ -55,6 +447,20 @@ public class Wine {
         )
     }
 
+    /// Run a `wine` process with GPTK binaries and the given arguments
+    private static func runGptkProcess(
+        name: String? = nil, args: [String], environment: [String: String] = [:],
+        fileHandle: FileHandle?
+    ) throws -> AsyncStream<ProcessOutput> {
+        guard let gptkWine = Wine.gptkWineBinary() else {
+            throw GPTKError.binaryNotFound
+        }
+        return try runProcess(
+            name: name, args: args, environment: environment, executableURL: gptkWine,
+            fileHandle: fileHandle
+        )
+    }
+
     /// Run a `wineserver` process with the given arguments and environment variables returning a stream of output
     private static func runWineserverProcess(
         name: String? = nil, args: [String], environment: [String: String] = [:],
@@ -66,6 +472,20 @@ public class Wine {
         )
     }
 
+    /// Run a `wineserver` process with GPTK binaries and the given arguments
+    private static func runGptkWineserverProcess(
+        name: String? = nil, args: [String], environment: [String: String] = [:],
+        fileHandle: FileHandle?
+    ) throws -> AsyncStream<ProcessOutput> {
+        guard let gptkWineserver = Wine.gptkWineserverBinary() else {
+            throw GPTKError.binaryNotFound
+        }
+        return try runProcess(
+            name: name, args: args, environment: environment, executableURL: gptkWineserver,
+            fileHandle: fileHandle
+        )
+    }
+
     /// Run a `wine` process with the given arguments and environment variables returning a stream of output
     public static func runWineProcess(
         name: String? = nil, args: [String], bottle: Bottle, environment: [String: String] = [:]
@@ -73,6 +493,14 @@ public class Wine {
         let fileHandle = try makeFileHandle()
         fileHandle.writeApplicaitonInfo()
         fileHandle.writeInfo(for: bottle)
+
+        if bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+            return try runGptkProcess(
+                name: name, args: args,
+                environment: constructWineEnvironment(for: bottle, environment: environment),
+                fileHandle: fileHandle
+            )
+        }
 
         return try runWineProcess(
             name: name, args: args,
@@ -89,6 +517,14 @@ public class Wine {
         fileHandle.writeApplicaitonInfo()
         fileHandle.writeInfo(for: bottle)
 
+        if bottle.settings.gptkEnabled, Wine.gptkWineserverBinary() != nil {
+            return try runGptkWineserverProcess(
+                name: name, args: args,
+                environment: constructWineServerEnvironment(for: bottle, environment: environment),
+                fileHandle: fileHandle
+            )
+        }
+
         return try runWineserverProcess(
             name: name, args: args,
             environment: constructWineServerEnvironment(for: bottle, environment: environment),
@@ -100,21 +536,47 @@ public class Wine {
     public static func runProgram(
         at url: URL, args: [String] = [], bottle: Bottle, environment: [String: String] = [:]
     ) async throws {
-        if bottle.settings.dxvk {
-            try enableDXVK(bottle: bottle)
-        }
+        if bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+            // GPTK uses D3DMetal natively — no DXVK needed
+            for await _ in try Self.runGptkProcess(
+                name: url.lastPathComponent,
+                args: ["start", "/unix", url.path(percentEncoded: false)] + args,
+                environment: constructWineEnvironment(for: bottle, environment: environment),
+                fileHandle: try makeFileHandle()
+            ) { }
+        } else {
+            if bottle.settings.dxvk {
+                try enableDXVK(bottle: bottle)
+            }
 
-        for await _ in try Self.runWineProcess(
+            for await _ in try Self.runWineProcess(
+                name: url.lastPathComponent,
+                args: ["start", "/unix", url.path(percentEncoded: false)] + args,
+                bottle: bottle, environment: environment
+            ) { }
+        }
+    }
+
+    /// Execute a `wine start /unix {url}` command via GPTK
+    public static func runProgramGptk(
+        at url: URL, args: [String] = [], bottle: Bottle, environment: [String: String] = [:]
+    ) async throws {
+        // GPTK uses D3DMetal natively — no DXVK needed
+        for await _ in try Self.runGptkProcess(
             name: url.lastPathComponent,
             args: ["start", "/unix", url.path(percentEncoded: false)] + args,
-            bottle: bottle, environment: environment
+            environment: constructWineEnvironment(for: bottle, environment: environment),
+            fileHandle: try makeFileHandle()
         ) { }
     }
 
     public static func generateRunCommand(
         at url: URL, bottle: Bottle, args: String, environment: [String: String]
     ) -> String {
-        var wineCmd = "\(wineBinary.esc) start /unix \(url.esc) \(args)"
+        // Use GPTK binary if enabled, otherwise use bundled Wine
+        let wineBin = (bottle.settings.gptkEnabled && Wine.gptkWineBinary() != nil)
+            ? Wine.gptkWineBinary()! : wineBinary
+        var wineCmd = "\(wineBin.esc) start /unix \(url.esc) \(args)"
         let env = constructWineEnvironment(for: bottle, environment: environment)
         for environment in env {
             wineCmd = "\(environment.key)=\"\(environment.value)\" " + wineCmd
@@ -124,22 +586,26 @@ public class Wine {
     }
 
     public static func generateTerminalEnvironmentCommand(bottle: Bottle) -> String {
+        // Use GPTK binary if enabled, otherwise use bundled Wine
+        let wineBin = (bottle.settings.gptkEnabled && Wine.gptkWineBinary() != nil)
+            ? Wine.gptkWineBinary()! : wineBinary
+
         var cmd = """
-        export PATH=\"\(WhiskyWineInstaller.binFolder.path):$PATH\"
-        export WINE=\"wine64\"
-        alias wine=\"wine64\"
-        alias winecfg=\"wine64 winecfg\"
-        alias msiexec=\"wine64 msiexec\"
-        alias regedit=\"wine64 regedit\"
-        alias regsvr32=\"wine64 regsvr32\"
-        alias wineboot=\"wine64 wineboot\"
-        alias wineconsole=\"wine64 wineconsole\"
-        alias winedbg=\"wine64 winedbg\"
-        alias winefile=\"wine64 winefile\"
-        alias winepath=\"wine64 winepath\"
+        export PATH="\(wineBin.deletingLastPathComponent().path):$PATH"
+        export WINE="wine64"
+        alias wine="wine64"
+        alias winecfg="wine64 winecfg"
+        alias msiexec="wine64 msiexec"
+        alias regedit="wine64 regedit"
+        alias regsvr32="wine64 regsvr32"
+        alias wineboot="wine64 wineboot"
+        alias wineconsole="wine64 wineconsole"
+        alias winedbg="wine64 winedbg"
+        alias winefile="wine64 winefile"
+        alias winepath="wine64 winepath"
         """
 
-        let env = constructWineEnvironment(for: bottle, environment: constructWineEnvironment(for: bottle))
+        let env = constructWineEnvironment(for: bottle, environment: [:])
         for environment in env {
             cmd += "\nexport \(environment.key)=\"\(environment.value)\""
         }
@@ -147,11 +613,19 @@ public class Wine {
         return cmd
     }
 
-    /// Run a `wineserver` command with the given arguments and return the output result
+    @discardableResult
     private static func runWineserver(_ args: [String], bottle: Bottle) async throws -> String {
         var result: [ProcessOutput] = []
+        let environment = constructWineServerEnvironment(for: bottle, environment: [:])
 
-        for await output in try Self.runWineserverProcess(args: args, bottle: bottle, environment: [:]) {
+        let processRunner: () throws -> AsyncStream<ProcessOutput>
+        if bottle.settings.gptkEnabled, Wine.gptkWineserverBinary() != nil {
+            processRunner = { try runGptkWineserverProcess(args: args, environment: environment, fileHandle: nil) }
+        } else {
+            processRunner = { try runWineserverProcess(args: args, bottle: bottle, environment: [:]) }
+        }
+
+        for await output in try processRunner() {
             result.append(output)
         }
 
@@ -180,7 +654,14 @@ public class Wine {
             environment = constructWineEnvironment(for: bottle, environment: environment)
         }
 
-        for await output in try runWineProcess(args: args, environment: environment, fileHandle: fileHandle) {
+        let processRunner: () throws -> AsyncStream<ProcessOutput>
+        if let bottle = bottle, bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+            processRunner = { try runGptkProcess(args: args, environment: environment, fileHandle: fileHandle) }
+        } else {
+            processRunner = { try runWineProcess(args: args, environment: environment, fileHandle: fileHandle) }
+        }
+
+        for await output in try processRunner() {
             switch output {
             case .started, .terminated:
                 break
@@ -205,7 +686,35 @@ public class Wine {
 
     @discardableResult
     public static func runBatchFile(url: URL, bottle: Bottle) async throws -> String {
+        if bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+            return try await runBatchFileGptk(url: url, bottle: bottle)
+        }
         return try await runWine(["cmd", "/c", url.path(percentEncoded: false)], bottle: bottle)
+    }
+
+    @discardableResult
+    private static func runBatchFileGptk(url: URL, bottle: Bottle) async throws -> String {
+        var result: [String] = []
+        let fileHandle = try makeFileHandle()
+        fileHandle.writeApplicaitonInfo()
+        fileHandle.writeInfo(for: bottle)
+
+        let env = constructWineEnvironment(for: bottle, environment: [:])
+
+        for await output in try runGptkProcess(
+            args: ["cmd", "/c", url.path(percentEncoded: false)],
+            environment: env,
+            fileHandle: fileHandle
+        ) {
+            switch output {
+            case .started, .terminated:
+                break
+            case .message(let message), .error(let message):
+                result.append(message)
+            }
+        }
+
+        return result.joined()
     }
 
     public static func killBottle(bottle: Bottle) throws {
@@ -240,7 +749,8 @@ public class Wine {
         return result
     }
 
-    /// Construct an environment merging the bottle values with the given values
+    /// Construct an environment merging the bottle values with the given values,
+    /// including GPTK-specific variables when enabled.
     private static func constructWineServerEnvironment(
         for bottle: Bottle, environment: [String: String] = [:]
     ) -> [String: String] {
@@ -249,6 +759,8 @@ public class Wine {
             "WINEDEBUG": "fixme-all",
             "GST_DEBUG": "1"
         ]
+        // Apply bottle-level environment variables (DXVK, VKD3D, shader cache, perf mode, etc.)
+        bottle.settings.environmentVariables(wineEnv: &result)
         guard !environment.isEmpty else { return result }
         result.merge(environment, uniquingKeysWith: { $1 })
         return result
@@ -257,6 +769,41 @@ public class Wine {
 
 enum WineInterfaceError: Error {
     case invalidResponce
+}
+
+enum GPTKError: Error, LocalizedError {
+    case binaryNotFound
+
+    var errorDescription: String? {
+        switch self {
+        case .binaryNotFound:
+            return String(localized: "gptk.error.binaryNotFound")
+        }
+    }
+}
+
+/// Information about a GPTK update check result
+public struct GPTKUpdateInfo: Sendable {
+    public let installed: String?  // Currently installed version
+    public let latest: String?     // Latest available version
+    public let needsUpdate: Bool   // Whether an update is available
+
+    public init(installed: String?, latest: String?, needsUpdate: Bool) {
+        self.installed = installed
+        self.latest = latest
+        self.needsUpdate = needsUpdate
+    }
+
+    /// A user-friendly description of the update status
+    public var statusMessage: String {
+        if let latest = latest, let installed = installed {
+            return String(format: NSLocalizedString("gptk.update.available", comment: ""), installed, latest)
+        } else if let installed = installed {
+            return String(format: NSLocalizedString("gptk.update.current", comment: ""), installed)
+        } else {
+            return NSLocalizedString("gptk.update.unknown", comment: "")
+        }
+    }
 }
 
 enum RegistryType: String {

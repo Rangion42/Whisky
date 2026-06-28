@@ -39,6 +39,14 @@ struct ConfigView: View {
     @AppStorage("wineSectionExpanded") private var wineSectionExpanded: Bool = true
     @AppStorage("dxvkSectionExpanded") private var dxvkSectionExpanded: Bool = true
     @AppStorage("metalSectionExpanded") private var metalSectionExpanded: Bool = true
+    @AppStorage("gptkSectionExpanded") private var gptkSectionExpanded: Bool = true
+
+    // GPTK state
+    @State private var gptkVersion: String? = nil
+    @State private var updateInfo: GPTKUpdateInfo? = nil
+    @State private var performanceMetrics: Wine.PerformanceMetrics? = nil
+    @State private var shaderStatus: Wine.ShaderCompilationStatus = .init()
+    @State private var metricsTimer: Timer? = nil
 
     var body: some View {
         Form {
@@ -120,20 +128,38 @@ struct ConfigView: View {
             Section("config.title.dxvk", isExpanded: $dxvkSectionExpanded) {
                 Toggle(isOn: $bottle.settings.dxvk) {
                     Text("config.dxvk")
+                    if bottle.settings.gptkEnabled {
+                        Text("config.dxvk.gptkDisabled")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
+                .disabled(bottle.settings.gptkEnabled)
                 Toggle(isOn: $bottle.settings.dxvkAsync) {
                     Text("config.dxvk.async")
                 }
-                .disabled(!bottle.settings.dxvk)
+                .disabled(!bottle.settings.dxvk || bottle.settings.gptkEnabled)
                 Picker("config.dxvkHud", selection: $bottle.settings.dxvkHud) {
                     Text("config.dxvkHud.full").tag(DXVKHUD.full)
                     Text("config.dxvkHud.partial").tag(DXVKHUD.partial)
                     Text("config.dxvkHud.fps").tag(DXVKHUD.fps)
                     Text("config.dxvkHud.off").tag(DXVKHUD.off)
                 }
-                .disabled(!bottle.settings.dxvk)
+                .disabled(!bottle.settings.dxvk || bottle.settings.gptkEnabled)
             }
             Section("config.title.metal", isExpanded: $metalSectionExpanded) {
+                Toggle(isOn: $bottle.settings.gptkEnabled) {
+                    Text("config.gptk")
+                    if !Wine.gptkWineBinaryExists() {
+                        Text("config.gptk.notFound")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("config.gptk.found")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
                 Toggle(isOn: $bottle.settings.metalHud) {
                     Text("config.metalHud")
                 }
@@ -151,11 +177,188 @@ struct ConfigView: View {
                     }
                 }
             }
+
+            // MARK: - GPTK Section
+            Section("config.title.gptk", isExpanded: $gptkSectionExpanded) {
+                // Version info
+                if let version = gptkVersion {
+                    HStack {
+                        Text("config.gptk.version")
+                        Spacer()
+                        Text(version)
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    HStack {
+                        Text("config.gptk.version")
+                        Spacer()
+                        ProgressView().controlSize(.small)
+                    }
+                }
+
+                // Update check
+                if let update = updateInfo {
+                    HStack {
+                        Text("config.gptk.update")
+                        Spacer()
+                        if update.needsUpdate {
+                            Label("config.gptk.update.available", systemImage: "arrow.down.circle")
+                                .foregroundStyle(.orange)
+                        } else {
+                            Label("config.gptk.update.current", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+                    }
+                }
+
+                // VKD3D Settings
+                Toggle(isOn: $bottle.settings.vkd3dEnabled) {
+                    Text("config.gptk.vkd3d")
+                    if !bottle.settings.gptkEnabled {
+                        Text("config.gptk.vkd3d.info")
+                            .font(.caption)
+                    }
+                }
+                .disabled(!bottle.settings.gptkEnabled)
+
+                if bottle.settings.vkd3dEnabled {
+                    TextField("config.gptk.vkd3d.debug.placeholder", text: $bottle.settings.vkd3dDebug)
+                        .disabled(!bottle.settings.gptkEnabled)
+
+                    Picker("config.gptk.vkd3d.profile", selection: $bottle.settings.vkd3dProfile) {
+                        Text("config.gptk.vkd3d.profile.auto").tag("auto")
+                        Text("config.gptk.vkd3d.profile.zink").tag("zink")
+                        Text("config.gptk.vkd3d.profile.radv").tag("radv")
+                        Text("config.gptk.vkd3d.profile.custom").tag("custom")
+                    }
+                    .disabled(!bottle.settings.gptkEnabled)
+                }
+
+                // Shader Cache Settings
+                Toggle(isOn: $bottle.settings.shaderCacheEnabled) {
+                    Text("config.gptk.shader.cache")
+                }
+                .disabled(!bottle.settings.gptkEnabled)
+
+                if bottle.settings.shaderCacheEnabled {
+                    Picker("config.gptk.shader.mode", selection: $bottle.settings.shaderCacheMode) {
+                        Text("config.gptk.shader.mode.disabled").tag(GPTKShaderCacheMode.disabled)
+                        Text("config.gptk.shader.mode.compileOnLaunch").tag(GPTKShaderCacheMode.compileOnLaunch)
+                        Text("config.gptk.shader.mode.prewarm").tag(GPTKShaderCacheMode.prewarm)
+                    }
+                    .disabled(!bottle.settings.gptkEnabled)
+
+                    // Shader compilation progress indicator
+                    if shaderStatus.isCompiling {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ProgressView(value: shaderStatus.progressPercent)
+                            Text(String(format: "config.gptk.shader.progress", Int(shaderStatus.progressPercent)))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if shaderStatus.state == .error {
+                        Text(shaderStatus.errorMessage ?? "config.gptk.shader.error.unknown")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else if shaderStatus.state == .complete {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text(String(format: "config.gptk.shader.complete", shaderStatus.compiledShaders))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                // Performance Mode
+                Picker("config.gptk.perf.mode", selection: $bottle.settings.performanceMode) {
+                    Text("config.gptk.perf.mode.balanced").tag(GPTKPerformanceMode.balanced)
+                    Text("config.gptk.perf.mode.performance").tag(GPTKPerformanceMode.performance)
+                    Text("config.gptk.perf.mode.quality").tag(GPTKPerformanceMode.quality)
+                }
+                .disabled(!bottle.settings.gptkEnabled)
+
+                // Memory Management
+                Picker("config.gptk.memory.mode", selection: $bottle.settings.memoryMode) {
+                    Text("config.gptk.memory.mode.auto").tag(GPTKMemoryMode.auto)
+                    Text("config.gptk.memory.mode.limited").tag(GPTKMemoryMode.limited)
+                }
+                .disabled(!bottle.settings.gptkEnabled)
+
+                if bottle.settings.memoryMode == .limited {
+                    HStack {
+                        Text("config.gptk.memory.limit")
+                        TextField("", value: $bottle.settings.memoryLimitMB!, format: .number)
+                            .frame(width: 80)
+                    }
+                    .disabled(!bottle.settings.gptkEnabled)
+                }
+
+                // Performance Metrics (live)
+                if bottle.settings.gptkEnabled {
+                    Button("config.gptk.metrics.refresh") {
+                        Task(priority: .userInitiated) {
+                            performanceMetrics = await Wine.capturePerformanceMetrics(for: bottle)
+                        }
+                    }
+
+                    if let metrics = performanceMetrics {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("config.gptk.metrics.gpu")
+                                Spacer()
+                                Text(String(format: "%.1f%%", metrics.gpuUsage))
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                            HStack {
+                                Text("config.gptk.metrics.cpu")
+                                Spacer()
+                                Text(String(format: "%.1f%%", metrics.cpuUsage))
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                            HStack {
+                                Text("config.gptk.metrics.memory")
+                                Spacer()
+                                Text(String(format: "%.0f MB", metrics.memoryUsageMB))
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                        }
+                    }
+                }
+
+                // Game Compatibility Notes (placeholder - full implementation in game list)
+                if !bottle.settings.gptkConfig.gameCompatibilityNotes.isEmpty {
+                    Text(String(format: "config.gptk.compat.notes.count", bottle.settings.gptkConfig.gameCompatibilityNotes.count))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // Game Presets (placeholder - full implementation in game list)
+                if !bottle.settings.gptkConfig.gamePresets.isEmpty {
+                    Text(String(format: "config.gptk.presets.count", bottle.settings.gptkConfig.gamePresets.count))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // Check for updates button
+                Button("config.gptk.checkUpdates") {
+                    Task(priority: .userInitiated) {
+                        do {
+                            updateInfo = try await Wine.checkGptkUpdate()
+                        } catch {
+                            print("Failed to check for GPTK updates: \(error)")
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .animation(.whiskyDefault, value: wineSectionExpanded)
         .animation(.whiskyDefault, value: dxvkSectionExpanded)
         .animation(.whiskyDefault, value: metalSectionExpanded)
+        .animation(.whiskyDefault, value: gptkSectionExpanded)
         .bottomBar {
             HStack {
                 Spacer()
@@ -214,6 +417,41 @@ struct ConfigView: View {
                     dpiConfigLoadingState = .success
                 }
             }
+
+            // Load GPTK version and set up periodic metrics if enabled
+            if bottle.settings.gptkEnabled {
+                Task(priority: .userInitiated) {
+                    do {
+                        gptkVersion = try await Wine.gptkVersion()
+                    } catch {
+                        print("Failed to load GPTK version: \(error)")
+                        gptkVersion = "unknown"
+                    }
+                }
+
+                // Set up periodic performance metrics refresh (every 2 seconds)
+                metricsTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+                    Task(priority: .userInitiated) {
+                        performanceMetrics = await Wine.capturePerformanceMetrics(for: bottle)
+
+                        // Update shader status from tracker
+                        if let activeGame = await Wine.shaderTracker.activeGames.first {
+                            shaderStatus = await Wine.shaderTracker.getStatus(forGame: activeGame)
+                        } else {
+                            // No active games, check if we should reset
+                            if shaderStatus.isCompiling {
+                                // Shader compilation may have completed when game exited
+                                shaderStatus = await Wine.shaderTracker.getStatus(forGame: "current")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            // Clean up timer
+            metricsTimer?.invalidate()
+            metricsTimer = nil
         }
         .onChange(of: bottle.settings.windowsVersion) { _, newValue in
             if winVersionLoadingState == .success {

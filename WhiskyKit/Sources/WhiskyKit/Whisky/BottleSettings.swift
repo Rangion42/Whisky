@@ -124,6 +124,119 @@ public struct BottleMetalConfig: Codable, Equatable {
     }
 }
 
+public enum GPTKPerformanceMode: String, Codable, Equatable {
+    case balanced = "balanced"
+    case performance = "performance"
+    case quality = "quality"
+
+    public var description: String {
+        switch self {
+        case .balanced: return "config.gptk.perf.balanced"
+        case .performance: return "config.gptk.perf.performance"
+        case .quality: return "config.gptk.perf.quality"
+        }
+    }
+}
+
+public enum GPTKShaderCacheMode: String, Codable, Equatable {
+    case disabled = "disabled"
+    case compileOnLaunch = "compileOnLaunch"
+    case prewarm = "prewarm"
+
+    public var description: String {
+        switch self {
+        case .disabled: return "config.gptk.shader.disabled"
+        case .compileOnLaunch: return "config.gptk.shader.compileOnLaunch"
+        case .prewarm: return "config.gptk.shader.prewarm"
+        }
+    }
+}
+
+public enum GPTKMemoryMode: String, Codable, Equatable {
+    case auto = "auto"
+    case limited = "limited"
+
+    public var description: String {
+        switch self {
+        case .auto: return "config.gptk.memory.auto"
+        case .limited: return "config.gptk.memory.limited"
+        }
+    }
+}
+
+public struct BottleGptkConfig: Codable, Equatable {
+    var enabled: Bool = false
+
+    // VKD3D support for D3D12 → Vulkan translation
+    var vkd3dEnabled: Bool = true
+    var vkd3dDebug: String = ""
+    var vkd3dProfile: String = "auto"
+
+    // Shader compilation management
+    var shaderCacheEnabled: Bool = true
+    var shaderCacheMode: GPTKShaderCacheMode = .compileOnLaunch
+
+    // Performance presets
+    var performanceMode: GPTKPerformanceMode = .balanced
+
+    // Memory management
+    var memoryMode: GPTKMemoryMode = .auto
+    var memoryLimitMB: Int?
+
+    // Game compatibility notes (game name → note)
+    var gameCompatibilityNotes: [String: String] = [:]
+
+    // Game type presets (game name → preset)
+    var gamePresets: [String: GPTKPerformanceMode] = [:]
+
+    public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        self.vkd3dEnabled = try container.decodeIfPresent(Bool.self, forKey: .vkd3dEnabled) ?? true
+        self.vkd3dDebug = try container.decodeIfPresent(String.self, forKey: .vkd3dDebug) ?? ""
+        self.vkd3dProfile = try container.decodeIfPresent(String.self, forKey: .vkd3dProfile) ?? "auto"
+        self.shaderCacheEnabled = try container.decodeIfPresent(Bool.self, forKey: .shaderCacheEnabled) ?? true
+        self.shaderCacheMode = try container.decodeIfPresent(GPTKShaderCacheMode.self, forKey: .shaderCacheMode) ?? .compileOnLaunch
+        self.performanceMode = try container.decodeIfPresent(GPTKPerformanceMode.self, forKey: .performanceMode) ?? .balanced
+        self.memoryMode = try container.decodeIfPresent(GPTKMemoryMode.self, forKey: .memoryMode) ?? .auto
+        self.memoryLimitMB = try container.decodeIfPresent(Int.self, forKey: .memoryLimitMB)
+        self.gameCompatibilityNotes = try container.decodeIfPresent([String: String].self, forKey: .gameCompatibilityNotes) ?? [:]
+        self.gamePresets = try container.decodeIfPresent([String: GPTKPerformanceMode].self, forKey: .gamePresets) ?? [:]
+    }
+
+    /// Get the performance mode for a specific game by name
+    public func performanceMode(forGame gameName: String) -> GPTKPerformanceMode {
+        return gamePresets[gameName] ?? performanceMode
+    }
+
+    /// Get the compatibility note for a specific game by name
+    public func compatibilityNote(forGame gameName: String) -> String? {
+        return gameCompatibilityNotes[gameName]
+    }
+
+    /// Add or update a compatibility note for a game
+    public mutating func setCompatibilityNote(_ note: String, forGame gameName: String) {
+        gameCompatibilityNotes[gameName] = note
+    }
+
+    /// Remove a compatibility note for a game
+    public mutating func removeCompatibilityNote(forGame gameName: String) {
+        gameCompatibilityNotes.removeValue(forKey: gameName)
+    }
+
+    /// Set the performance preset for a specific game
+    public mutating func setGamePreset(_ mode: GPTKPerformanceMode, forGame gameName: String) {
+        gamePresets[gameName] = mode
+    }
+
+    /// Remove the preset for a specific game (falls back to bottle default)
+    public mutating func removeGamePreset(forGame gameName: String) {
+        gamePresets.removeValue(forKey: gameName)
+    }
+}
+
 public enum DXVKHUD: Codable, Equatable {
     case full, partial, fps, off
 }
@@ -151,12 +264,24 @@ public struct BottleSettings: Codable, Equatable {
     private var wineConfig: BottleWineConfig
     private var metalConfig: BottleMetalConfig
     private var dxvkConfig: BottleDXVKConfig
+    private var _gptkConfig: BottleGptkConfig
+
+    enum CodingKeys: String, CodingKey {
+        case fileVersion
+        case info
+        case wineConfig
+        case metalConfig
+        case dxvkConfig
+        // Map the plist key "gptkConfig" to the stored property _gptkConfig
+        case _gptkConfig = "gptkConfig"
+    }
 
     public init() {
         self.info = BottleInfo()
         self.wineConfig = BottleWineConfig()
         self.metalConfig = BottleMetalConfig()
         self.dxvkConfig = BottleDXVKConfig()
+        self._gptkConfig = BottleGptkConfig()
     }
 
     // swiftlint:disable line_length
@@ -167,6 +292,7 @@ public struct BottleSettings: Codable, Equatable {
         self.wineConfig = try container.decodeIfPresent(BottleWineConfig.self, forKey: .wineConfig) ?? BottleWineConfig()
         self.metalConfig = try container.decodeIfPresent(BottleMetalConfig.self, forKey: .metalConfig) ?? BottleMetalConfig()
         self.dxvkConfig = try container.decodeIfPresent(BottleDXVKConfig.self, forKey: .dxvkConfig) ?? BottleDXVKConfig()
+        self._gptkConfig = try container.decodeIfPresent(BottleGptkConfig.self, forKey: ._gptkConfig) ?? BottleGptkConfig()
     }
     // swiftlint:enable line_length
 
@@ -238,6 +364,88 @@ public struct BottleSettings: Codable, Equatable {
     public var dxvkHud: DXVKHUD {
         get {  return dxvkConfig.dxvkHud }
         set { dxvkConfig.dxvkHud = newValue }
+    }
+
+    public var gptkEnabled: Bool {
+        get { return gptkConfig.enabled }
+        set { _gptkConfig.enabled = newValue }
+    }
+
+    // MARK: - GPTK Configuration Properties
+
+    public var vkd3dEnabled: Bool {
+        get { return _gptkConfig.vkd3dEnabled }
+        set { _gptkConfig.vkd3dEnabled = newValue }
+    }
+
+    public var vkd3dDebug: String {
+        get { return _gptkConfig.vkd3dDebug }
+        set { _gptkConfig.vkd3dDebug = newValue }
+    }
+
+    public var vkd3dProfile: String {
+        get { return _gptkConfig.vkd3dProfile }
+        set { _gptkConfig.vkd3dProfile = newValue }
+    }
+
+    public var shaderCacheEnabled: Bool {
+        get { return _gptkConfig.shaderCacheEnabled }
+        set { _gptkConfig.shaderCacheEnabled = newValue }
+    }
+
+    public var shaderCacheMode: GPTKShaderCacheMode {
+        get { return _gptkConfig.shaderCacheMode }
+        set { _gptkConfig.shaderCacheMode = newValue }
+    }
+
+    public var performanceMode: GPTKPerformanceMode {
+        get { return _gptkConfig.performanceMode }
+        set { _gptkConfig.performanceMode = newValue }
+    }
+
+    public var memoryMode: GPTKMemoryMode {
+        get { return _gptkConfig.memoryMode }
+        set { _gptkConfig.memoryMode = newValue }
+    }
+
+    public var memoryLimitMB: Int? {
+        get { return _gptkConfig.memoryLimitMB }
+        set { _gptkConfig.memoryLimitMB = newValue }
+    }
+
+    /// Expose the GPTK config for read-only access (e.g., game presets, compatibility notes)
+    public var gptkConfig: BottleGptkConfig {
+        get { return _gptkConfig }
+    }
+
+    /// Get the performance mode for a specific game by name
+    public func performanceMode(forGame gameName: String) -> GPTKPerformanceMode {
+        return _gptkConfig.performanceMode(forGame: gameName)
+    }
+
+    /// Get the compatibility note for a specific game by name
+    public func compatibilityNote(forGame gameName: String) -> String? {
+        return _gptkConfig.compatibilityNote(forGame: gameName)
+    }
+
+    /// Add or update a compatibility note for a game
+    public mutating func setCompatibilityNote(_ note: String, forGame gameName: String) {
+        _gptkConfig.setCompatibilityNote(note, forGame: gameName)
+    }
+
+    /// Remove a compatibility note for a game
+    public mutating func removeCompatibilityNote(forGame gameName: String) {
+        _gptkConfig.removeCompatibilityNote(forGame: gameName)
+    }
+
+    /// Set the performance preset for a specific game
+    public mutating func setGamePreset(_ mode: GPTKPerformanceMode, forGame gameName: String) {
+        _gptkConfig.setGamePreset(mode, forGame: gameName)
+    }
+
+    /// Remove the preset for a specific game (falls back to bottle default)
+    public mutating func removeGamePreset(forGame gameName: String) {
+        _gptkConfig.removeGamePreset(forGame: gameName)
     }
 
     @discardableResult
@@ -324,6 +532,62 @@ public struct BottleSettings: Codable, Equatable {
 
         if dxrEnabled {
             wineEnv.updateValue("1", forKey: "D3DM_SUPPORT_DXR")
+        }
+
+        // MARK: - GPTK Environment Variables (only when GPTK is enabled)
+        if gptkEnabled {
+            // VKD3D for D3D12 → Vulkan translation
+            if vkd3dEnabled {
+                // Merge with existing WINEDLLOVERRIDES instead of overwriting (fixes DXVK collision)
+                let existingOverrides = wineEnv["WINEDLLOVERRIDES"] ?? ""
+                let vkd3dOverride = "d3d12=n,b"
+                if !existingOverrides.contains(vkd3dOverride) {
+                    let merged = existingOverrides.isEmpty ? vkd3dOverride : "\(existingOverrides),\(vkd3dOverride)"
+                    wineEnv.updateValue(merged, forKey: "WINEDLLOVERRIDES")
+                }
+                if !vkd3dDebug.isEmpty {
+                    wineEnv.updateValue(vkd3dDebug, forKey: "VKD3D_DEBUG")
+                }
+                if vkd3dProfile != "auto" {
+                    wineEnv.updateValue(vkd3dProfile, forKey: "VKD3D_CONFIG")
+                }
+            }
+
+            // Shader cache mode controls how GPTK handles shader compilation
+            switch shaderCacheMode {
+            case .disabled:
+                wineEnv.updateValue("0", forKey: "GPTK_SHADER_CACHE")
+            case .prewarm:
+                wineEnv.updateValue("2", forKey: "GPTK_SHADER_CACHE")
+            case .compileOnLaunch:
+                wineEnv.updateValue("1", forKey: "GPTK_SHADER_CACHE")
+            }
+
+            // Performance mode presets GPU/CPU resource allocation
+            switch performanceMode {
+            case .balanced:
+                // Default behavior - no special env vars needed
+                break
+            case .performance:
+                wineEnv.updateValue("1", forKey: "GPTK_PERF_MODE")
+                // Prioritize GPU over CPU for frame generation
+                wineEnv.updateValue("gpu", forKey: "GPTK_PRIORITY")
+            case .quality:
+                wineEnv.updateValue("2", forKey: "GPTK_PERF_MODE")
+                // Prioritize visual quality over raw speed
+                wineEnv.updateValue("quality", forKey: "GPTK_PRIORITY")
+            }
+
+            // Memory management for GPTK wine processes
+            switch memoryMode {
+            case .auto:
+                // Let GPTK manage memory automatically
+                break
+            case .limited:
+                if let limitMB = memoryLimitMB, limitMB > 0 {
+                    wineEnv.updateValue(String(limitMB), forKey: "GPTK_MEMORY_LIMIT_MB")
+                }
+            }
         }
     }
 }

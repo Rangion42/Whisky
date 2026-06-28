@@ -35,9 +35,15 @@ extension Program {
 
         Task.detached(priority: .userInitiated) {
             do {
-                try await Wine.runProgram(
-                    at: self.url, args: arguments, bottle: self.bottle, environment: environment
-                )
+                if self.bottle.settings.gptkEnabled, Wine.gptkWineBinary() != nil {
+                    try await Wine.runProgramGptk(
+                        at: self.url, args: arguments, bottle: self.bottle, environment: environment
+                    )
+                } else {
+                    try await Wine.runProgram(
+                        at: self.url, args: arguments, bottle: self.bottle, environment: environment
+                    )
+                }
             } catch {
                 await MainActor.run {
                     self.showRunError(message: error.localizedDescription)
@@ -50,6 +56,10 @@ extension Program {
         return Wine.generateRunCommand(
             at: self.url, bottle: bottle, args: settings.arguments, environment: generateEnvironment()
         )
+    }
+
+    public func generateTerminalEnvironmentCommand() -> String {
+        return Wine.generateTerminalEnvironmentCommand(bottle: bottle)
     }
 
     public func runInTerminal() {
