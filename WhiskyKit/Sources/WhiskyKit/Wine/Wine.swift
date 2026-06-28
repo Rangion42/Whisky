@@ -37,10 +37,16 @@ public class Wine {
             return homebrewPath
         }
 
-        // Fallback: check if GPTK app is installed (older installations)
-        let gptkAppPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine64/bin/wine64")
+        // Current GPTK app layout (macOS Sonoma+)
+        let gptkAppPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64")
         if FileManager.default.fileExists(atPath: gptkAppPath.path) {
             return gptkAppPath
+        }
+
+        // Fallback: check if GPTK app is installed (older installations)
+        let gptkOldPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine64/bin/wine64")
+        if FileManager.default.fileExists(atPath: gptkOldPath.path) {
+            return gptkOldPath
         }
 
         // Another possible location for GPTK
@@ -409,6 +415,18 @@ public class Wine {
         let homebrewPath = URL(fileURLWithPath: "/opt/homebrew/bin/wineserver")
         if FileManager.default.fileExists(atPath: homebrewPath.path) {
             return homebrewPath
+        }
+
+        // Current GPTK app layout (macOS Sonoma+)
+        let gptkAppPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wineserver")
+        if FileManager.default.fileExists(atPath: gptkAppPath.path) {
+            return gptkAppPath
+        }
+
+        // Fallback: older GPTK layouts
+        let gptkOldPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/wine64/bin/wineserver")
+        if FileManager.default.fileExists(atPath: gptkOldPath.path) {
+            return gptkOldPath
         }
 
         let gptkLibPath = URL(fileURLWithPath: "/Applications/Game Porting Toolkit.app/Contents/Resources/lib/wine/wine64/bin/wineserver")
